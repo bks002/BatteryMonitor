@@ -1,5 +1,12 @@
+import {cookies} from "next/headers";
+
 export async function GET(req: Request) {
     try {
+        const isAuth = (await cookies()).get("auth");
+
+        if (!isAuth) {
+            return Response.json({ error: "Unauthorized" }, { status: 401 });
+        }
         const { searchParams } = new URL(req.url);
         const uniqueid = searchParams.get("uniqueid");
 

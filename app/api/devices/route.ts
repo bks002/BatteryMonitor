@@ -1,5 +1,12 @@
+import {cookies} from "next/headers";
+
 export async function GET() {
     try {
+        const isAuth = (await cookies()).get("auth");
+
+        if (!isAuth) {
+            return Response.json({ error: "Unauthorized" }, { status: 401 });
+        }
         const response = await fetch(
             "https://api.thingsup.io/api/device/filter?optimize=true&page=1&pagesize=3000",
             {
