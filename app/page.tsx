@@ -20,21 +20,42 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
 
-  /* ✅ Fetch devices */
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch("/api/devices", {
+        setLoading(true);
+
+        // 1️⃣ Fetch ThingsUp devices
+        const deviceRes = await fetch("/api/devices", {
           cache: "no-store",
         });
 
-        if (!res.ok) throw new Error("Failed to fetch devices");
+        if (!deviceRes.ok) throw new Error("Failed devices");
 
-        const data = await res.json();
+        const deviceData = await deviceRes.json();
+        const apiDevices: Device[] = deviceData.items || [];
 
-        console.log("DATA 👉", data);
+        // 2️⃣ Fetch registered names from Google Sheet
+        const regRes = await fetch("/api/get-registered-devices");
 
-        setDevices(data.items || []);
+        if (!regRes.ok) throw new Error("Failed registered");
+
+        const registered = await regRes.json();
+
+        console.log("Registered 👉", registered);
+
+        // Extract battery names
+        const registeredNames = registered.map(
+            (r: any) => r.batteryName
+        );
+
+        // 3️⃣ Filter by name
+        const filtered = apiDevices.filter((device) =>
+            registeredNames.includes(device.name)
+        );
+
+        setDevices(filtered);
+
       } catch (err) {
         console.error(err);
         setError("Unable to load devices");
@@ -45,13 +66,19 @@ export default function Home() {
 
     load();
 
-    // 🔄 Auto refresh every 15 sec
     const interval = setInterval(load, 15000);
     return () => clearInterval(interval);
   }, []);
 
   return (
       <div className="min-h-screen bg-gray-100 dark:bg-gray-950 p-4">
+
+        {/* Header */}
+        <div className="mb-4">
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+            My Batteries
+          </h1>
+        </div>
 
         {/* States */}
         {loading ? (
@@ -60,7 +87,7 @@ export default function Home() {
             <p className="text-red-500">{error}</p>
         ) : devices.length === 0 ? (
             <p className="text-gray-500 dark:text-gray-400">
-              No devices found
+              No registered batteries found
             </p>
         ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
@@ -68,13 +95,13 @@ export default function Home() {
                   <BatteryCard
                       key={device.uniqueid}
                       device={device}
-                      onClick={setSelectedDevice} // ✅ open modal
+                      onClick={setSelectedDevice}
                   />
               ))}
             </div>
         )}
 
-        {/* ✅ Modal */}
+        {/* Modal */}
         {selectedDevice && (
             <DeviceModal
                 device={selectedDevice}
