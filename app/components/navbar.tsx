@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import ThemeToggle from "./ThemeToggle";
 import RegisterModal from "@/app/components/registerModal";
 
-
 export default function Navbar() {
     const router = useRouter();
     const [showModal, setShowModal] = useState(false);
@@ -40,6 +39,7 @@ export default function Navbar() {
                         + Add
                     </button>
 
+                    {/* Theme Toggle */}
                     <ThemeToggle />
 
                     {/* Logout */}
@@ -53,7 +53,17 @@ export default function Navbar() {
 
                 {/* Mobile Actions */}
                 <div className="flex sm:hidden items-center gap-2">
+
+                    {/* Theme Toggle */}
                     <ThemeToggle />
+
+                    {/* Logout Icon Button */}
+                    <button
+                        onClick={handleLogout}
+                        className="bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded text-sm active:scale-90 transition"
+                    >
+                       Logout
+                    </button>
                 </div>
             </nav>
 
@@ -65,7 +75,7 @@ export default function Navbar() {
                 +
             </button>
 
-            {/* Modal */}
+            {/* Register Modal */}
             {showModal && (
                 <RegisterModal onClose={() => setShowModal(false)} />
             )}
