@@ -66,8 +66,8 @@ export default function Home() {
 
     load();
 
-    const interval = setInterval(load, 15000);
-    return () => clearInterval(interval);
+    // const interval = setInterval(load, 15000);
+    // return () => clearInterval(interval);
   }, []);
 
   return (
