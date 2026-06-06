@@ -1,0 +1,350 @@
+"use client";
+
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import Link from "next/link";
+
+interface Device {
+    Id: number;
+    UserId: number;
+    DeviceId: string;
+    DeviceName: string;
+}
+
+interface Driver {
+    UserId: number;
+    FirstName: string;
+    LastName: string;
+    Email: string;
+    PhoneNumber: string;
+    IsActive: boolean;
+    Address: string;
+    Aadhar: string;
+    Devices: Device[];
+    CreatedAt: string;
+}
+
+function TrackContent() {
+    const searchParams = useSearchParams();
+    const router = useRouter();
+    const targetVehicle = searchParams.get("vehicle_number");
+
+    const [drivers, setDrivers] = useState<Driver[]>([]);
+    const [telemetry, setTelemetry] = useState<any | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [selectedDevice, setSelectedDevice] = useState<string>("");
+
+    // Simulation states
+    const [isNavigating, setIsNavigating] = useState(false);
+    const [carOffset, setCarOffset] = useState({ x: 40, y: 220 });
+    const [distanceLeft, setDistanceLeft] = useState(8.6);
+    const [timeLeft, setTimeLeft] = useState(18);
+    const [toast, setToast] = useState<string | null>(null);
+
+    // Delhi/Faridabad Mock Path coordinates
+    const startPoint = { x: 40, y: 220 };
+    const endPoint = { x: 260, y: 60 };
+
+    useEffect(() => {
+        const fetchDriversAndTelemetry = async () => {
+            try {
+                setLoading(true);
+                const res = await fetch("/api/bgvusers");
+                if (!res.ok) throw new Error("Failed to load driver profiles");
+                const users: Driver[] = await res.json();
+                setDrivers(users);
+
+                // Determine active device
+                let activeDev = targetVehicle || "";
+                if (!activeDev) {
+                    const firstWithDevice = users.find(u => u.Devices && u.Devices.length > 0);
+                    if (firstWithDevice) {
+                        activeDev = firstWithDevice.Devices[0].DeviceId.trim();
+                    }
+                }
+
+                if (activeDev) {
+                    setSelectedDevice(activeDev);
+                    // Fetch device telemetry
+                    const devRes = await fetch(`/api/vehicle-data?vehicle_number=${activeDev}`);
+                    if (devRes.ok) {
+                        const devData = await devRes.json();
+                        if (devData.status === "success" && devData.results && devData.results.length > 0) {
+                            setTelemetry(devData.results[0]);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("Tracking load error:", err);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        fetchDriversAndTelemetry();
+    }, [targetVehicle]);
+
+    // Handle simulation movement
+    useEffect(() => {
+        let animFrame: any;
+        if (isNavigating) {
+            let progress = 0;
+            const animate = () => {
+                progress += 0.003;
+                if (progress >= 1) {
+                    setCarOffset(endPoint);
+                    setDistanceLeft(0);
+                    setTimeLeft(0);
+                    setIsNavigating(false);
+                    setToast("Vehicle has arrived at Faridabad Swap Hub!");
+                } else {
+                    const cx = 150;
+                    const cy = 200;
+                    const x = (1 - progress) * (1 - progress) * startPoint.x + 2 * (1 - progress) * progress * cx + progress * progress * endPoint.x;
+                    const y = (1 - progress) * (1 - progress) * startPoint.y + 2 * (1 - progress) * progress * cy + progress * progress * endPoint.y;
+                    setCarOffset({ x, y });
+
+                    const dist = 8.6 * (1 - progress);
+                    setDistanceLeft(Number(dist.toFixed(1)));
+                    setTimeLeft(Math.round(18 * (1 - progress)));
+                    animFrame = requestAnimationFrame(animate);
+                }
+            };
+            animFrame = requestAnimationFrame(animate);
+        }
+        return () => cancelAnimationFrame(animFrame);
+    }, [isNavigating]);
+
+    useEffect(() => {
+        if (toast) {
+            const timer = setTimeout(() => setToast(null), 4000);
+            return () => clearTimeout(timer);
+        }
+    }, [toast]);
+
+    const handleSelectDevice = (dev: string) => {
+        setIsNavigating(false);
+        setCarOffset(startPoint);
+        setDistanceLeft(8.6);
+        setTimeLeft(18);
+        router.push(`/track?vehicle_number=${dev}`);
+    };
+
+    const activeDriver = drivers.find(u => u.Devices && u.Devices.some(dev => dev.DeviceId === selectedDevice));
+
+    return (
+        <div className="space-y-8 animate-fade-in p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full">
+            {/* Toast notification */}
+            {toast && (
+                <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2.5 px-4 py-3 rounded-2xl shadow-xl border bg-green-50 dark:bg-green-950/85 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 animate-scale-in">
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                    <span className="text-xs font-bold">{toast}</span>
+                </div>
+            )}
+
+            {/* Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                    <h2 className="text-base font-black uppercase tracking-tight text-brand-navy dark:text-white">Live Route Tracking</h2>
+                    <p className="text-[11px] text-gray-455">Monitor GPS coordinates, simulate route navigation, and review swap station targets.</p>
+                </div>
+                {activeDriver && (
+                    <Link
+                        href={`/drivers/${activeDriver.UserId}`}
+                        className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-brand-navy dark:text-white px-4 py-2.5 rounded-xl text-xs font-bold transition-all active:scale-95 text-center"
+                    >
+                        👤 View driver profile
+                    </Link>
+                )}
+            </div>
+
+            {loading ? (
+                <div className="py-20 text-center space-y-3">
+                    <div className="relative w-9 h-9 mx-auto">
+                        <div className="absolute inset-0 rounded-full border-4 border-brand-green/10" />
+                        <div className="absolute inset-0 rounded-full border-4 border-t-brand-green animate-spin" />
+                    </div>
+                    <p className="text-xs font-bold text-gray-455">Synching GPS telemetry feeds...</p>
+                </div>
+            ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                    
+                    {/* Left Pane: Route map */}
+                    <div className="lg:col-span-8 space-y-6">
+                        <div className="saas-card overflow-hidden">
+                            {/* Map header */}
+                            <div className="p-4 bg-gray-50/50 dark:bg-gray-955/20 border-b border-gray-150 dark:border-gray-800 flex justify-between items-center text-xs">
+                                <span className="font-extrabold text-brand-navy dark:text-white">Faridabad Swap Circle Sector 12</span>
+                                <span className="flex items-center gap-1.5 font-bold text-[10px] text-gray-400">
+                                    <span className="w-2 h-2 rounded-full bg-brand-green animate-ping" /> GPS LOCK ESTABLISHED
+                                </span>
+                            </div>
+
+                            {/* Map Area */}
+                            <div className="relative w-full h-[450px] bg-slate-100 dark:bg-slate-950 overflow-hidden">
+                                {/* SVG Grid & Roads Map */}
+                                <svg className="absolute inset-0 w-full h-full text-slate-200 dark:text-slate-900" viewBox="0 0 320 280" fill="none">
+                                    {/* Major Grid Roads */}
+                                    <path d="M0 60 L320 60 M0 130 L320 130 M0 210 L320 210 M80 0 L80 280 M180 0 L180 280 M270 0 L270 280" stroke="currentColor" strokeWidth="2.5" />
+                                    {/* Minor highways */}
+                                    <path d="M40 0 C 100 80, 120 180, 40 280" stroke="currentColor" strokeWidth="1" strokeDasharray="3 3" />
+                                    <path d="M0 240 C 120 210, 200 240, 320 180" stroke="currentColor" strokeWidth="1" strokeDasharray="3 3" />
+
+                                    {/* Delhi/Faridabad Border boundary */}
+                                    <path d="M0 10 L320 10" stroke="#ef4444" strokeWidth="1" strokeDasharray="4 4" opacity="0.3" />
+                                    <text x="10" y="24" className="fill-red-500/50 text-[8px] font-mono" fontStyle="italic">DELHI / NCR SECTOR LINE</text>
+
+                                    {/* Station Target Pin */}
+                                    <circle cx={endPoint.x} cy={endPoint.y} r="16" className="fill-brand-green/20" />
+                                    <circle cx={endPoint.x} cy={endPoint.y} r="6" className="fill-brand-green" />
+
+                                    {/* Path Line */}
+                                    <path 
+                                        d={`M ${startPoint.x} ${startPoint.y} Q 150 200, ${endPoint.x} ${endPoint.y}`} 
+                                        stroke="#10b981" 
+                                        strokeWidth="4" 
+                                        strokeLinecap="round" 
+                                        strokeLinejoin="round" 
+                                        opacity="0.4"
+                                    />
+
+                                    {/* Animated Vehicle Node */}
+                                    <circle cx={carOffset.x} cy={carOffset.y} r="14" className="fill-blue-500 shadow-md" />
+                                    <circle cx={carOffset.x} cy={carOffset.y} r="5" className="fill-white" />
+                                </svg>
+
+                                {/* Live Pulsing marker overlay on target */}
+                                <div className="absolute top-[52px] left-[252px] w-4 h-4 map-pulse" />
+
+                                {/* Map Legend floating overlay */}
+                                <div className="absolute bottom-4 left-4 bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm border border-gray-200 dark:border-gray-800 p-3 rounded-xl space-y-2 text-[10px] font-bold">
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-3 h-3 rounded bg-blue-500" />
+                                        <span className="text-brand-navy dark:text-white">Active vehicle ({selectedDevice})</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-3 h-3 rounded bg-brand-green" />
+                                        <span className="text-brand-navy dark:text-white">Delhi Swap station #04</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Right Pane: Navigation statistics */}
+                    <div className="lg:col-span-4 space-y-6">
+                        {/* Device selector */}
+                        <div className="saas-card p-5 space-y-3.5">
+                            <span className="text-[9px] font-black uppercase text-gray-400 tracking-widest pl-1 block">Switch Mapped Vehicle</span>
+                            <div className="flex gap-2">
+                                <select
+                                    value={selectedDevice}
+                                    onChange={(e) => handleSelectDevice(e.target.value)}
+                                    className="flex-1 px-3 py-2 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50 dark:bg-gray-950 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-brand-green cursor-pointer"
+                                >
+                                    <option value="" disabled>Select vehicle...</option>
+                                    {drivers.filter(d => d.Devices && d.Devices.length > 0).map(d => {
+                                        const dev = d.Devices[0].DeviceId.trim();
+                                        return (
+                                            <option key={d.UserId} value={dev}>
+                                                {dev} - {d.FirstName} {d.LastName}
+                                            </option>
+                                        );
+                                    })}
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* Telemetry diagnostics stats */}
+                        {selectedDevice ? (
+                            <div className="saas-card p-6 space-y-6">
+                                <div className="border-b border-gray-100 dark:border-gray-800 pb-4 space-y-1">
+                                    <span className="text-[9.5px] font-black uppercase text-gray-455 tracking-wider">Navigation console</span>
+                                    {activeDriver && (
+                                        <h3 className="font-extrabold text-sm text-brand-navy dark:text-white leading-tight">
+                                            {activeDriver.FirstName} {activeDriver.LastName}
+                                        </h3>
+                                    )}
+                                </div>
+
+                                {/* Metrics panel */}
+                                <div className="bg-gray-50 dark:bg-gray-955 border border-gray-150 dark:border-gray-800 p-4 rounded-2xl text-xs space-y-4">
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-gray-400 font-bold uppercase text-[9px] tracking-wider">Remaining Distance</span>
+                                        <span className="font-black text-brand-navy dark:text-white text-sm">{distanceLeft} Km</span>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-gray-400 font-bold uppercase text-[9px] tracking-wider">Estimated Duration (ETA)</span>
+                                        <span className="font-black text-brand-navy dark:text-white text-sm">{timeLeft} Min</span>
+                                    </div>
+                                    <div className="flex justify-between items-start border-t border-gray-200 dark:border-gray-800 pt-3">
+                                        <span className="text-gray-400 font-bold uppercase text-[9px] tracking-wider pt-0.5">Target station</span>
+                                        <span className="font-semibold text-gray-700 dark:text-gray-300 text-right leading-tight max-w-[150px]">Faridabad Delhi Swap Center, Delhi Gate</span>
+                                    </div>
+                                </div>
+
+                                {/* Telemetry snapshot */}
+                                <div className="space-y-3 text-xs border-t border-gray-100 dark:border-gray-800 pt-4">
+                                    <span className="text-[9px] font-black uppercase text-gray-400 tracking-wider block pl-1">Telemetry Snapshot</span>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                            <span className="text-[8px] text-gray-400 block font-bold uppercase">SOC</span>
+                                            <span className="text-xs font-black text-brand-green block mt-0.5">{telemetry?.soc ?? 82}%</span>
+                                        </div>
+                                        <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                            <span className="text-[8px] text-gray-400 block font-bold uppercase">Operating Temp</span>
+                                            <span className="text-xs font-black text-brand-navy dark:text-white block mt-0.5">{telemetry?.cell_temperature_01 ? `${Math.round(telemetry.cell_temperature_01)}°C` : "32°C"}</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Navigation trigger button */}
+                                {distanceLeft > 0 ? (
+                                    <button
+                                        onClick={() => setIsNavigating(true)}
+                                        disabled={isNavigating}
+                                        className="w-full bg-brand-green hover:bg-brand-green-hover text-white py-3 rounded-2xl font-bold transition-all active:scale-[0.98] disabled:opacity-60 cursor-pointer text-center text-xs"
+                                    >
+                                        {isNavigating ? "Simulating GPS movement..." : "Start Route Simulation"}
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={() => {
+                                            setCarOffset(startPoint);
+                                            setDistanceLeft(8.6);
+                                            setTimeLeft(18);
+                                            setIsNavigating(false);
+                                        }}
+                                        className="w-full bg-blue-500 hover:bg-blue-600 text-white py-3 rounded-2xl font-bold transition-all active:scale-[0.98] cursor-pointer text-center text-xs"
+                                    >
+                                        Reset Route simulation
+                                    </button>
+                                )}
+                            </div>
+                        ) : (
+                            <div className="saas-card p-6 text-center text-xs font-semibold text-gray-455">
+                                No active telemetry mapped to this route selection.
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+export default function TrackPage() {
+    return (
+        <Suspense fallback={
+            <div className="flex flex-col items-center justify-center min-h-[400px] space-y-4">
+                <div className="relative w-10 h-10">
+                    <div className="absolute inset-0 rounded-full border-4 border-brand-green/10" />
+                    <div className="absolute inset-0 rounded-full border-4 border-t-brand-green animate-spin" />
+                </div>
+                <p className="text-xs font-bold text-gray-400">Loading tracking console...</p>
+            </div>
+        }>
+            <TrackContent />
+        </Suspense>
+    );
+}
