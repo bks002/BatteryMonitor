@@ -25,6 +25,12 @@ export default function RegisterModal({ onClose, onSave }: Props) {
 
             if (!res.ok) throw new Error();
 
+            // Notify dashboard of newly registered battery
+            window.dispatchEvent(new Event("battery-registered"));
+
+            if (onSave) {
+                onSave(name);
+            }
             onClose();
         } catch {
             setError("Failed to save battery registration");

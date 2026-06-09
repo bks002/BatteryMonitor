@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import LinkBatteryModal from "@/app/components/LinkBatteryModal";
 
 interface BatteryOwner {
     id: string;
@@ -14,10 +16,14 @@ interface BatteryOwner {
     status: "Verified" | "Pending";
     linkedDevices: string[];
     createdDate: string;
+    userTypeId: number;
+    userTypeName: string;
+    passwordHash?: string | null;
     raw?: any;
 }
 
 export default function OnboardingPage() {
+    const router = useRouter();
     const [owners, setOwners] = useState<BatteryOwner[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
     const [statusFilter, setStatusFilter] = useState<"All" | "Verified" | "Pending">("All");
@@ -32,7 +38,14 @@ export default function OnboardingPage() {
     const [mobile, setMobile] = useState("");
     const [address, setAddress] = useState("");
     const [linkedDeviceInput, setLinkedDeviceInput] = useState("");
+    const [userTypeId, setUserTypeId] = useState<number>(2); // Default to User
+    const [availableRoles, setAvailableRoles] = useState<{ UserTypeId: number; UserTypeName: string }[]>([
+        { UserTypeId: 2, UserTypeName: "User" },
+        { UserTypeId: 1, UserTypeName: "Admin" }
+    ]);
+    const [password, setPassword] = useState("");
     const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+    const [linkOwner, setLinkOwner] = useState<BatteryOwner | null>(null);
     
     // Notification Toast State
     const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
@@ -73,12 +86,18 @@ export default function OnboardingPage() {
     const fetchUsers = async () => {
         try {
             const res = await fetch("/api/bgvusers");
-            if (!res.ok) throw new Error("Failed to load users");
+            if (!res.ok) {
+                if (res.status === 401) {
+                    router.push("/login");
+                    return;
+                }
+                throw new Error("Failed to load users");
+            }
             const data = await res.json();
             
             if (data && data.length > 0) {
                 const parsedOwners: BatteryOwner[] = data.map((user: any) => {
-                    let aadharVal = user.Aadhar || user.PasswordHash || "";
+                    let aadharVal = user.Aadhar || "";
                     let linkedDevices: string[] = [];
 
                     // Map Devices list items to string IDs
@@ -97,6 +116,9 @@ export default function OnboardingPage() {
                         status: user.IsActive === false ? "Pending" : "Verified",
                         linkedDevices: linkedDevices,
                         createdDate: user.CreatedAt ? new Date(user.CreatedAt).toISOString().split("T")[0] : new Date().toISOString().split("T")[0],
+                        userTypeId: user.UserTypeId ?? 2,
+                        userTypeName: user.UserTypeName || "User",
+                        passwordHash: user.PasswordHash || "",
                         raw: user
                     };
                 });
@@ -111,8 +133,23 @@ export default function OnboardingPage() {
         }
     };
 
+    const fetchUserTypes = async () => {
+        try {
+            const res = await fetch("/api/bgvusers/usertypes");
+            if (res.ok) {
+                const data = await res.json();
+                if (data && data.length > 0) {
+                    setAvailableRoles(data);
+                }
+            }
+        } catch (err) {
+            console.error("Error fetching user types:", err);
+        }
+    };
+
     useEffect(() => {
         fetchUsers();
+        fetchUserTypes();
     }, []);
 
     // Auto-dismiss Toast
@@ -178,6 +215,8 @@ export default function OnboardingPage() {
         setMobile("");
         setAddress("");
         setLinkedDeviceInput("");
+        setUserTypeId(2);
+        setPassword("");
         setFormErrors({});
         setIsOpen(true);
     };
@@ -192,6 +231,8 @@ export default function OnboardingPage() {
         setMobile(owner.mobile);
         setAddress(owner.address);
         setLinkedDeviceInput(owner.linkedDevices.join(", "));
+        setUserTypeId(owner.userTypeId || 2);
+        setPassword("");
         setFormErrors({});
         setIsOpen(true);
     };
@@ -205,7 +246,7 @@ export default function OnboardingPage() {
             return;
         }
 
-                const deviceList = linkedDeviceInput.split(",").map(d => d.trim().toUpperCase()).filter(Boolean);
+        const deviceList = linkedDeviceInput.split(",").map(d => d.trim().toUpperCase()).filter(Boolean);
         const devicesArray = deviceList.map((devId) => {
             const existingDev = editingId 
                 ? (owners.find(o => o.id === editingId)?.raw?.Devices || []).find((d: any) => d.DeviceId.trim().toUpperCase() === devId) 
@@ -220,6 +261,9 @@ export default function OnboardingPage() {
             };
         });
 
+        const selectedRole = availableRoles.find(r => r.UserTypeId === userTypeId);
+        const resolvedRoleName = selectedRole ? selectedRole.UserTypeName : (userTypeId === 1 ? "Admin" : "User");
+
         if (editingId) {
             const owner = owners.find(o => o.id === editingId);
             const rawUser = owner?.raw || {};
@@ -229,7 +273,7 @@ export default function OnboardingPage() {
                 FirstName: firstName.trim(),
                 LastName: lastName.trim(),
                 Email: email.trim(),
-                PasswordHash: rawUser.PasswordHash || null,
+                PasswordHash: password.trim() || rawUser.PasswordHash || null,
                 PhoneNumber: mobile,
                 IsActive: owner?.status === "Verified",
                 CreatedAt: rawUser.CreatedAt || new Date().toISOString(),
@@ -239,6 +283,8 @@ export default function OnboardingPage() {
                 Address: address.trim(),
                 Photo: rawUser.Photo || "",
                 Aadhar: aadhar,
+                UserTypeId: userTypeId,
+                UserTypeName: resolvedRoleName,
                 Devices: devicesArray
             };
 
@@ -267,7 +313,7 @@ export default function OnboardingPage() {
                 FirstName: firstName.trim(),
                 LastName: lastName.trim(),
                 Email: email.trim(),
-                PasswordHash: null,
+                PasswordHash: password.trim() || null,
                 PhoneNumber: mobile,
                 IsActive: true,
                 CreatedAt: new Date().toISOString(),
@@ -277,6 +323,8 @@ export default function OnboardingPage() {
                 Address: address.trim(),
                 Photo: "",
                 Aadhar: aadhar,
+                UserTypeId: userTypeId,
+                UserTypeName: resolvedRoleName,
                 Devices: devicesArray
             };
 
@@ -327,47 +375,9 @@ export default function OnboardingPage() {
     };
 
     // Link Device action with POST persistence
-    const handleLinkDevice = async (id: string) => {
+    const handleLinkDevice = (id: string) => {
         const owner = owners.find(o => o.id === id);
-        if (!owner) return;
-        
-        const devNum = prompt(`Link battery ID/vehicle code to ${owner.firstName} ${owner.lastName} (e.g. CCLN26B0153):`);
-        if (devNum === null) return;
-        
-        if (!devNum.trim()) {
-            setToast({ message: "Device ID cannot be empty", type: "error" });
-            return;
-        }
-
-        const cleanDev = devNum.trim().toUpperCase();
-
-        try {
-            const res = await fetch("/api/bgvusers/add-device", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    Id: 0,
-                    UserId: Number(id),
-                    DeviceId: cleanDev,
-                    DeviceName: cleanDev,
-                    IsActive: true,
-                    CreatedAt: new Date().toISOString()
-                })
-            });
-
-            if (!res.ok) {
-                const errData = await res.json();
-                throw new Error(errData.error || errData.message || "Failed to save device linkage");
-            }
-
-            setToast({ message: `Linked device ${cleanDev} to ${owner.firstName}`, type: "success" });
-            fetchUsers();
-        } catch (err: any) {
-            console.error("Error linking device:", err);
-            setToast({ message: `Link failed: ${err.message}`, type: "error" });
-        }
+        if (owner) setLinkOwner(owner);
     };
 
     // Filter Owners based on search & status
@@ -542,12 +552,12 @@ export default function OnboardingPage() {
                             <table className="hidden md:table saas-table saas-table-zebra">
                                 <thead>
                                     <tr>
-                                        <th className="pl-6">Driver Profile</th>
-                                        <th>Registered Email</th>
-                                        <th>Aadhar Identity</th>
-                                        <th>Mobile Contact</th>
-                                        <th>Physical Address</th>
-                                        <th>Linked Assets</th>
+                                        <th className="text-left pl-6">Driver Profile</th>
+                                        <th className="text-left">Registered Email</th>
+                                        <th className="text-left">Aadhar Identity</th>
+                                        <th className="text-left">Mobile Contact</th>
+                                        <th className="text-left">Physical Address</th>
+                                        <th className="text-left">Linked Assets</th>
                                         <th className="text-right pr-6">Actions</th>
                                     </tr>
                                 </thead>
@@ -561,13 +571,22 @@ export default function OnboardingPage() {
                                                     </div>
                                                     <div>
                                                         <h4 className="font-extrabold text-xs text-brand-navy dark:text-white leading-tight">{owner.firstName} {owner.lastName}</h4>
-                                                        <span className={`inline-flex items-center gap-1.5 mt-1 text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
-                                                            owner.status === "Verified"
-                                                                ? "bg-green-500/10 text-brand-green"
-                                                                : "bg-amber-500/10 text-amber-500"
-                                                        }`}>
-                                                            {owner.status}
-                                                        </span>
+                                                        <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                                            <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                                                owner.status === "Verified"
+                                                                    ? "bg-green-500/10 text-brand-green"
+                                                                    : "bg-amber-500/10 text-amber-500"
+                                                            }`}>
+                                                                {owner.status}
+                                                            </span>
+                                                            <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                                                owner.userTypeId === 1
+                                                                    ? "bg-purple-500/10 text-purple-650 dark:text-purple-400"
+                                                                    : "bg-gray-500/10 text-gray-550 dark:text-gray-405"
+                                                            }`}>
+                                                                {owner.userTypeName}
+                                                            </span>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </td>
@@ -646,13 +665,22 @@ export default function OnboardingPage() {
                                                     <p className="text-[10px] text-gray-405 leading-tight mt-0.5">{owner.email || "No Email"}</p>
                                                 </div>
                                             </div>
-                                            <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
-                                                owner.status === "Verified"
-                                                    ? "bg-green-500/10 text-brand-green"
-                                                    : "bg-amber-500/10 text-amber-500"
-                                            }`}>
-                                                {owner.status}
-                                            </span>
+                                            <div className="flex flex-col items-end gap-1 shrink-0">
+                                                <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                                    owner.status === "Verified"
+                                                        ? "bg-green-500/10 text-brand-green"
+                                                        : "bg-amber-500/10 text-amber-500"
+                                                }`}>
+                                                    {owner.status}
+                                                </span>
+                                                <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                                    owner.userTypeId === 1
+                                                        ? "bg-purple-500/10 text-purple-650 dark:text-purple-400"
+                                                        : "bg-gray-500/10 text-gray-550 dark:text-gray-405"
+                                                }`}>
+                                                    {owner.userTypeName}
+                                                </span>
+                                            </div>
                                         </div>
 
                                         <div className="grid grid-cols-2 gap-2 bg-gray-50/50 dark:bg-gray-950/40 p-3 rounded-xl border border-gray-150 dark:border-gray-800 text-[11px] font-semibold">
@@ -770,6 +798,33 @@ export default function OnboardingPage() {
                                         className="w-full px-3 py-2 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50/50 dark:bg-gray-955 font-semibold focus:outline-none focus:ring-2 focus:ring-brand-green"
                                     />
                                     {formErrors.email && <p className="text-red-500 text-[10px] mt-0.5">{formErrors.email}</p>}
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-bold uppercase text-gray-405 block">User Type / Role *</label>
+                                        <select
+                                            value={userTypeId}
+                                            onChange={(e) => setUserTypeId(Number(e.target.value))}
+                                            className="w-full px-3 py-2 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-55/50 dark:bg-gray-955 font-semibold focus:outline-none focus:ring-2 focus:ring-brand-green text-xs"
+                                        >
+                                            {availableRoles.map((role) => (
+                                                <option key={role.UserTypeId} value={role.UserTypeId}>
+                                                    {role.UserTypeName}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-bold uppercase text-gray-405 block">Password</label>
+                                        <input
+                                            type="password"
+                                            placeholder={editingId ? "•••••• (leave blank to keep)" : "Enter password"}
+                                            value={password}
+                                            onChange={(e) => setPassword(e.target.value)}
+                                            className="w-full px-3 py-2 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50/50 dark:bg-gray-955 font-semibold focus:outline-none focus:ring-2 focus:ring-brand-green"
+                                        />
+                                    </div>
                                 </div>
 
                                 <div className="grid grid-cols-2 gap-4">
@@ -907,6 +962,18 @@ export default function OnboardingPage() {
                         )}
                     </div>
                 </div>
+            )}
+
+            {linkOwner && (
+                <LinkBatteryModal
+                    userId={Number(linkOwner.id)}
+                    userName={`${linkOwner.firstName} ${linkOwner.lastName}`}
+                    onClose={() => setLinkOwner(null)}
+                    onSuccess={() => {
+                        setToast({ message: `Linked battery successfully`, type: "success" });
+                        fetchUsers();
+                    }}
+                />
             )}
         </div>
     );

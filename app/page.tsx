@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import LinkBatteryModal from "@/app/components/LinkBatteryModal";
 
 interface Device {
     Id: number;
@@ -24,7 +25,17 @@ interface Driver {
     Aadhar: string;
     Devices: Device[];
     CreatedAt: string;
+    UserTypeId?: number;
+    UserTypeName?: string;
 }
+
+const PREDEFINED_BATTERIES = [
+    "CIN25D0178",
+    "CCLN26B0126",
+    "CCLN26B0140",
+    "CCLN26B0054",
+    "CGF25F0077"
+];
 
 export default function Home() {
     const router = useRouter();
@@ -36,24 +47,62 @@ export default function Home() {
     const [searchQuery, setSearchQuery] = useState("");
     const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
     const [selectedDriverDevices, setSelectedDriverDevices] = useState<Device[]>([]);
+    const [linkDriver, setLinkDriver] = useState<Driver | null>(null);
     const [activeTab, setActiveTab] = useState<"telemetry" | "cells" | "profile">("telemetry");
+    const [dashboardTab, setDashboardTab] = useState<"drivers" | "batteries">("drivers");
+    const [sheetBatteries, setSheetBatteries] = useState<string[]>([]);
+    const [assigningBattery, setAssigningBattery] = useState<string | null>(null);
+    const [selectedDriverForBattery, setSelectedDriverForBattery] = useState<number | null>(null);
 
     // Load initial data and poll telemetry
     const loadDashboardData = async () => {
         try {
             setLoading(true);
             const res = await fetch("/api/bgvusers");
-            if (!res.ok) throw new Error("Failed to load driver profiles");
+            if (!res.ok) {
+                if (res.status === 401) {
+                    router.push("/login");
+                    return;
+                }
+                throw new Error("Failed to load driver profiles");
+            }
             const users: Driver[] = await res.json();
 
-            // Fetch telemetry details for all unique mapped devices
-            const telemetryMap: Record<string, any> = {};
-            const uniqueDevices = users
-                .map(u => u.Devices ? u.Devices.map(d => d.DeviceId.trim()).filter(Boolean) : [])
-                .flat()
-                .filter((val, idx, self) => self.indexOf(val) === idx);
+            // Fetch dynamically registered batteries from Google Sheet
+            let sheetRegistered: string[] = [];
+            try {
+                const sheetRes = await fetch("/api/get-registered-devices");
+                if (sheetRes.ok) {
+                    const sheetData = await sheetRes.json();
+                    if (Array.isArray(sheetData)) {
+                        sheetData.forEach((item: any) => {
+                            if (item.batteryName && typeof item.batteryName === "string") {
+                                const cleanName = item.batteryName.trim().toUpperCase();
+                                if (cleanName && !sheetRegistered.includes(cleanName)) {
+                                    sheetRegistered.push(cleanName);
+                                }
+                            }
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error("Error fetching registered devices:", err);
+            }
+            setSheetBatteries(sheetRegistered);
 
-            const telemetryPromises = uniqueDevices.map(async (deviceNum) => {
+            // Fetch telemetry details for all unique batteries (predefined, sheet-registered, and mapped)
+            const telemetryMap: Record<string, any> = {};
+            const allUniqueBatteries = Array.from(
+                new Set([
+                    ...PREDEFINED_BATTERIES,
+                    ...sheetRegistered,
+                    ...users
+                        .map(u => u.Devices ? u.Devices.map(d => d.DeviceId.trim().toUpperCase()).filter(Boolean) : [])
+                        .flat()
+                ])
+            );
+
+            const telemetryPromises = allUniqueBatteries.map(async (deviceNum) => {
                 try {
                     const devRes = await fetch(`/api/vehicle-data?vehicle_number=${deviceNum}`);
                     if (devRes.ok) {
@@ -81,7 +130,17 @@ export default function Home() {
     useEffect(() => {
         loadDashboardData();
         const interval = setInterval(loadDashboardData, 30000);
-        return () => clearInterval(interval);
+
+        const handleBatteryRegistered = () => {
+            loadDashboardData();
+        };
+
+        window.addEventListener("battery-registered", handleBatteryRegistered);
+
+        return () => {
+            clearInterval(interval);
+            window.removeEventListener("battery-registered", handleBatteryRegistered);
+        };
     }, []);
 
     // Fetch latest devices when selected driver changes
@@ -116,43 +175,8 @@ export default function Home() {
     }, [toast]);
 
     // Handle Link Device
-    const handleLinkDevice = async (driver: Driver) => {
-        const devNum = prompt(`Link battery ID/vehicle code to ${driver.FirstName} ${driver.LastName}:`);
-        if (devNum === null) return;
-        
-        if (!devNum.trim()) {
-            setToast({ message: "Device ID cannot be empty", type: "error" });
-            return;
-        }
-
-        const cleanDev = devNum.trim().toUpperCase();
-
-        try {
-            const res = await fetch("/api/bgvusers/add-device", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    Id: 0,
-                    UserId: driver.UserId,
-                    DeviceId: cleanDev,
-                    DeviceName: cleanDev,
-                    IsActive: true,
-                    CreatedAt: new Date().toISOString()
-                })
-            });
-
-            if (!res.ok) {
-                const errData = await res.json();
-                throw new Error(errData.error || errData.message || "Failed to update driver device link");
-            }
-
-            setToast({ message: `Linked device ${cleanDev} to ${driver.FirstName}`, type: "success" });
-            setSelectedDriverId(null);
-            loadDashboardData();
-        } catch (err: any) {
-            console.error(err);
-            setToast({ message: `Link failed: ${err.message}`, type: "error" });
-        }
+    const handleLinkDevice = (driver: Driver) => {
+        setLinkDriver(driver);
     };
 
     // Handle Unlink Device
@@ -180,6 +204,74 @@ export default function Home() {
         }
     };
 
+    // Handle Unlink Battery by Battery ID
+    const handleUnlinkBatteryById = async (batteryId: string, driver: Driver) => {
+        const deviceRecord = driver.Devices && driver.Devices.length > 0 
+            ? driver.Devices.find(dev => dev.DeviceId.trim().toUpperCase() === batteryId.toUpperCase())
+            : null;
+            
+        if (!deviceRecord) return;
+        if (!confirm(`Are you sure you want to unlink battery ${batteryId} from driver ${driver.FirstName} ${driver.LastName}?`)) return;
+
+        try {
+            const res = await fetch(`/api/bgvusers/remove-device/${deviceRecord.Id}`, {
+                method: "DELETE"
+            });
+
+            if (!res.ok) {
+                const errData = await res.json();
+                throw new Error(errData.error || errData.message || "Failed to unlink device");
+            }
+
+            setToast({ message: `Unlinked battery ${batteryId} successfully`, type: "info" });
+            loadDashboardData();
+        } catch (err: any) {
+            console.error(err);
+            setToast({ message: `Unlink failed: ${err.message}`, type: "error" });
+        }
+    };
+
+    // Handle Assign Battery to Driver
+    const handleAssignBatteryToDriver = async () => {
+        if (!assigningBattery || !selectedDriverForBattery) {
+            setToast({ message: "Please select a driver", type: "error" });
+            return;
+        }
+
+        try {
+            const targetDriver = drivers.find(d => d.UserId === selectedDriverForBattery);
+            if (!targetDriver) return;
+
+            const res = await fetch("/api/bgvusers/add-device", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    Id: 0,
+                    UserId: selectedDriverForBattery,
+                    DeviceId: assigningBattery,
+                    DeviceName: assigningBattery,
+                    IsActive: true,
+                    CreatedAt: new Date().toISOString()
+                })
+            });
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || errData.message || "Failed to register battery linkage");
+            }
+
+            setToast({ message: `Battery ${assigningBattery} assigned to ${targetDriver.FirstName} ${targetDriver.LastName}`, type: "success" });
+            setAssigningBattery(null);
+            setSelectedDriverForBattery(null);
+            loadDashboardData();
+        } catch (err: any) {
+            console.error(err);
+            setToast({ message: `Assignment failed: ${err.message}`, type: "error" });
+        }
+    };
+
     // Derived stats
     const totalDrivers = drivers.length;
     const activeDevicesCount = drivers.filter(d => d.Devices && d.Devices.length > 0).length;
@@ -198,6 +290,38 @@ export default function Home() {
             d.PhoneNumber.includes(query) ||
             (d.Devices && d.Devices.some(dev => dev.DeviceId.toLowerCase().includes(query)))
         );
+    });
+
+    // Combine predefined and sheet-registered batteries
+    const allBatteries = Array.from(new Set([...PREDEFINED_BATTERIES, ...sheetBatteries]));
+
+    // Build mapping: batteryId -> driver who has it assigned
+    const batteryAssignmentMap: Record<string, Driver> = {};
+    drivers.forEach(driver => {
+        if (driver.Devices && Array.isArray(driver.Devices)) {
+            driver.Devices.forEach(dev => {
+                const cleanId = dev.DeviceId.trim().toUpperCase();
+                if (cleanId) {
+                    batteryAssignmentMap[cleanId] = driver;
+                }
+            });
+        }
+    });
+
+    // Filter batteries based on search query (battery name or assigned driver's name/phone)
+    const filteredBatteries = allBatteries.filter(batteryId => {
+        const query = searchQuery.toLowerCase();
+        const assignedDriver = batteryAssignmentMap[batteryId];
+        const batteryNameMatch = batteryId.toLowerCase().includes(query);
+        
+        if (!assignedDriver) {
+            return batteryNameMatch || "unassigned".includes(query) || "available".includes(query);
+        }
+
+        const driverNameMatch = `${assignedDriver.FirstName} ${assignedDriver.LastName}`.toLowerCase().includes(query);
+        const driverPhoneMatch = assignedDriver.PhoneNumber.includes(query);
+
+        return batteryNameMatch || driverNameMatch || driverPhoneMatch;
     });
 
     // Selected Driver Context (for modal)
@@ -364,9 +488,27 @@ export default function Home() {
             {/* Full Width Grid Layout */}
             <div className="space-y-6 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-3xl p-6 shadow-sm">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-100 dark:border-gray-800">
-                    <div>
-                        <h2 className="text-base font-black uppercase tracking-tight text-brand-navy dark:text-white">Active Driver Fleet</h2>
-                        <p className="text-[11px] text-gray-400 mt-1">Review your fleet below. Click any driver to open the dynamic diagnostics control modal.</p>
+                    <div className="flex items-center gap-6">
+                        <button
+                            onClick={() => setDashboardTab("drivers")}
+                            className={`pb-2 border-b-2 font-black uppercase text-xs tracking-tight transition-all cursor-pointer ${
+                                dashboardTab === "drivers"
+                                    ? "border-brand-green text-brand-green"
+                                    : "border-transparent text-gray-450 hover:text-brand-navy dark:hover:text-white"
+                            }`}
+                        >
+                            👥 Driver Fleet ({filteredDrivers.length})
+                        </button>
+                        <button
+                            onClick={() => setDashboardTab("batteries")}
+                            className={`pb-2 border-b-2 font-black uppercase text-xs tracking-tight transition-all cursor-pointer ${
+                                dashboardTab === "batteries"
+                                    ? "border-brand-green text-brand-green"
+                                    : "border-transparent text-gray-450 hover:text-brand-navy dark:hover:text-white"
+                            }`}
+                        >
+                            🔋 Battery Inventory ({filteredBatteries.length})
+                        </button>
                     </div>
                     
                     <div className="relative">
@@ -377,7 +519,7 @@ export default function Home() {
                         </span>
                         <input
                             type="text"
-                            placeholder="Search drivers or devices..."
+                            placeholder={dashboardTab === "drivers" ? "Search drivers or devices..." : "Search batteries or assigned drivers..."}
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
                             className="pl-9 pr-4 py-2.5 w-full sm:w-64 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50/50 dark:bg-gray-950 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-brand-green focus:border-transparent transition-all"
@@ -393,120 +535,285 @@ export default function Home() {
                         </div>
                         <p className="text-[11px] font-bold text-gray-400">Syncing with fleet network...</p>
                     </div>
-                ) : filteredDrivers.length === 0 ? (
-                    <div className="py-20 text-center text-xs font-semibold text-gray-400">
-                        No active drivers match your search queries.
-                    </div>
-                ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {filteredDrivers.map(d => {
-                            const status = getDriverStatus(d);
-                            const dev = d.Devices && d.Devices.length > 0 ? d.Devices[0].DeviceId.trim() : "";
-                            const tData = dev ? telemetryData[dev] : null;
+                ) : dashboardTab === "drivers" ? (
+                    filteredDrivers.length === 0 ? (
+                        <div className="py-20 text-center text-xs font-semibold text-gray-400">
+                            No active drivers match your search queries.
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                            {filteredDrivers.map(d => {
+                                const status = getDriverStatus(d);
+                                const dev = d.Devices && d.Devices.length > 0 ? d.Devices[0].DeviceId.trim() : "";
+                                const tData = dev ? telemetryData[dev] : null;
 
-                            return (
-                                <div
-                                    key={d.UserId}
-                                    onClick={() => setSelectedDriverId(d.UserId)}
-                                    className="saas-card p-5 cursor-pointer flex flex-col justify-between gap-5 relative overflow-hidden group select-none hover:shadow-lg transition-all"
-                                >
-                                    <div className="flex items-start justify-between">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 rounded-2xl bg-brand-green/10 text-brand-green flex items-center justify-center font-bold text-sm transition-transform group-hover:scale-105">
-                                                {(d.FirstName[0] || "") + (d.LastName[0] || "")}
+                                return (
+                                    <div
+                                        key={d.UserId}
+                                        onClick={() => setSelectedDriverId(d.UserId)}
+                                        className="saas-card p-5 cursor-pointer flex flex-col justify-between gap-5 relative overflow-hidden group select-none hover:shadow-lg transition-all"
+                                    >
+                                        <div className="flex items-start justify-between">
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-10 h-10 rounded-2xl bg-brand-green/10 text-brand-green flex items-center justify-center font-bold text-sm transition-transform group-hover:scale-105">
+                                                    {(d.FirstName[0] || "") + (d.LastName[0] || "")}
+                                                </div>
+                                                <div>
+                                                    <h4 className="font-extrabold text-xs text-brand-navy dark:text-white leading-tight group-hover:text-brand-green transition-colors">
+                                                        {d.FirstName} {d.LastName}
+                                                    </h4>
+                                                    <span className="text-[10px] text-gray-400 font-medium">FB{d.UserId} • +91 {d.PhoneNumber}</span>
+                                                </div>
                                             </div>
-                                            <div>
-                                                <h4 className="font-extrabold text-xs text-brand-navy dark:text-white leading-tight group-hover:text-brand-green transition-colors">
-                                                    {d.FirstName} {d.LastName}
-                                                </h4>
-                                                <span className="text-[10px] text-gray-400 font-medium">FB{d.UserId} • +91 {d.PhoneNumber}</span>
+                                            
+                                            <div className="flex flex-col items-end gap-1.5 shrink-0">
+                                                <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase px-2.5 py-0.5 rounded-full ${status.color}`}>
+                                                    <span className={`w-1.5 h-1.5 rounded-full bg-current ${status.label === "Active" ? "animate-pulse" : ""}`} />
+                                                    {status.label}
+                                                </span>
+                                                {d.UserTypeName && (
+                                                    <span className={`inline-flex items-center gap-1 text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                                        d.UserTypeId === 1
+                                                            ? "bg-purple-500/10 text-purple-650 dark:text-purple-400"
+                                                            : "bg-gray-500/10 text-gray-550 dark:text-gray-405"
+                                                    }`}>
+                                                        {d.UserTypeName}
+                                                    </span>
+                                                )}
                                             </div>
                                         </div>
-                                        
-                                        <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase px-2.5 py-0.5 rounded-full ${status.color}`}>
-                                            <span className={`w-1.5 h-1.5 rounded-full bg-current ${status.label === "Active" ? "animate-pulse" : ""}`} />
-                                            {status.label}
-                                        </span>
-                                    </div>
 
-                                    <div className="space-y-3 pt-1 border-t border-gray-100 dark:border-gray-800">
-                                        <div className="flex justify-between items-center text-xs">
-                                            <span className="text-gray-400 font-bold uppercase text-[9px]">Battery ID</span>
-                                            <span className="font-mono font-bold text-gray-750 dark:text-gray-300">
-                                                {dev || <span className="text-gray-405 italic font-normal">Unmapped</span>}
-                                            </span>
+                                        <div className="space-y-3 pt-1 border-t border-gray-100 dark:border-gray-800">
+                                            <div className="flex justify-between items-center text-xs">
+                                                <span className="text-gray-400 font-bold uppercase text-[9px]">Battery ID</span>
+                                                <span className="font-mono font-bold text-gray-750 dark:text-gray-300">
+                                                    {dev || <span className="text-gray-405 italic font-normal">Unmapped</span>}
+                                                </span>
+                                            </div>
+
+                                            {dev && tData ? (
+                                                <div className="space-y-2">
+                                                    <div className="flex justify-between text-xs font-bold">
+                                                        <span className="text-gray-400">Charge (SOC)</span>
+                                                        <span className={tData.soc < 20 ? "text-amber-500" : "text-brand-green"}>{tData.soc}%</span>
+                                                    </div>
+                                                    <div className="w-full bg-gray-100 dark:bg-gray-850 h-2 rounded-full overflow-hidden">
+                                                        <div 
+                                                            className={`h-full rounded-full ${tData.soc < 20 ? "bg-amber-500 animate-pulse" : "bg-brand-green"}`}
+                                                            style={{ width: `${tData.soc}%` }}
+                                                        />
+                                                    </div>
+
+                                                    <div className="grid grid-cols-2 gap-2 pt-1 text-[10px] text-gray-500 dark:text-gray-400 font-semibold">
+                                                        <div>
+                                                            <span>Voltage: </span>
+                                                            <strong className="text-brand-navy dark:text-white">
+                                                                {tData.Battery_Pack_voltage ? `${Number(tData.Battery_Pack_voltage).toFixed(1)}V` : `${Number(tData.battery ?? 0).toFixed(1)}V`}
+                                                            </strong>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <span>Temp: </span>
+                                                            <strong className="text-brand-navy dark:text-white">
+                                                                {tData.cell_temperature_01 ? `${Math.round(tData.cell_temperature_01)}°C` : "--"}
+                                                            </strong>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className="py-4 text-center text-[11px] text-gray-400 italic">
+                                                    No live telemetry signal.
+                                                </div>
+                                            )}
                                         </div>
 
-                                        {dev && tData ? (
-                                            <div className="space-y-2">
-                                                <div className="flex justify-between text-xs font-bold">
-                                                    <span className="text-gray-400">Charge (SOC)</span>
-                                                    <span className={tData.soc < 20 ? "text-amber-500" : "text-brand-green"}>{tData.soc}%</span>
-                                                </div>
-                                                <div className="w-full bg-gray-100 dark:bg-gray-850 h-2 rounded-full overflow-hidden">
-                                                    <div 
-                                                        className={`h-full rounded-full ${tData.soc < 20 ? "bg-amber-500 animate-pulse" : "bg-brand-green"}`}
-                                                        style={{ width: `${tData.soc}%` }}
-                                                    />
-                                                </div>
-
-                                                <div className="grid grid-cols-2 gap-2 pt-1 text-[10px] text-gray-500 dark:text-gray-400 font-semibold">
-                                                    <div>
-                                                        <span>Voltage: </span>
-                                                        <strong className="text-brand-navy dark:text-white">
-                                                            {tData.Battery_Pack_voltage ? `${Number(tData.Battery_Pack_voltage).toFixed(1)}V` : `${Number(tData.battery ?? 0).toFixed(1)}V`}
-                                                        </strong>
-                                                    </div>
-                                                    <div className="text-right">
-                                                        <span>Temp: </span>
-                                                        <strong className="text-brand-navy dark:text-white">
-                                                            {tData.cell_temperature_01 ? `${Math.round(tData.cell_temperature_01)}°C` : "--"}
-                                                        </strong>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <div className="py-4 text-center text-[11px] text-gray-400 italic">
-                                                No live telemetry signal.
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-gray-100 dark:border-gray-800 text-[10.5px]">
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                setSelectedDriverId(d.UserId);
-                                            }}
-                                            className="py-2.5 text-center bg-brand-green/15 text-brand-green hover:bg-brand-green hover:text-white rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1 shadow-xs"
-                                        >
-                                            ⚡ Diagnostics
-                                        </button>
-                                        
-                                        {dev ? (
-                                            <Link
-                                                href={`/track?vehicle_number=${dev}`}
-                                                onClick={(e) => e.stopPropagation()}
-                                                className="py-2.5 text-center bg-gray-50 hover:bg-gray-105 dark:bg-gray-800 dark:hover:bg-gray-750 text-brand-navy dark:text-white rounded-xl font-bold transition-all border border-gray-200 dark:border-transparent flex items-center justify-center gap-1"
-                                            >
-                                                🗺️ Track GPS
-                                            </Link>
-                                        ) : (
+                                        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-gray-100 dark:border-gray-800 text-[10.5px]">
                                             <button
                                                 onClick={(e) => {
                                                     e.stopPropagation();
-                                                    handleLinkDevice(d);
+                                                    setSelectedDriverId(d.UserId);
                                                 }}
-                                                className="py-2.5 text-center bg-gray-50 hover:bg-gray-105 dark:bg-gray-800 dark:hover:bg-gray-750 text-brand-navy dark:text-white rounded-xl font-bold transition-all border border-gray-200 dark:border-transparent cursor-pointer flex items-center justify-center gap-1"
+                                                className="py-2.5 text-center bg-brand-green/15 text-brand-green hover:bg-brand-green hover:text-white rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1 shadow-xs"
                                             >
-                                                + Link Battery
+                                                ⚡ Diagnostics
                                             </button>
-                                        )}
+                                            
+                                            {dev ? (
+                                                <Link
+                                                    href={`/track?vehicle_number=${dev}`}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    className="py-2.5 text-center bg-gray-50 hover:bg-gray-105 dark:bg-gray-800 dark:hover:bg-gray-750 text-brand-navy dark:text-white rounded-xl font-bold transition-all border border-gray-200 dark:border-transparent flex items-center justify-center gap-1"
+                                                >
+                                                    🗺️ Track GPS
+                                                </Link>
+                                            ) : (
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleLinkDevice(d);
+                                                    }}
+                                                    className="py-2.5 text-center bg-gray-50 hover:bg-gray-105 dark:bg-gray-800 dark:hover:bg-gray-750 text-brand-navy dark:text-white rounded-xl font-bold transition-all border border-gray-200 dark:border-transparent cursor-pointer flex items-center justify-center gap-1"
+                                                >
+                                                    + Link Battery
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
-                                </div>
-                            );
-                        })}
-                    </div>
+                                );
+                            })}
+                        </div>
+                    )
+                ) : (
+                    filteredBatteries.length === 0 ? (
+                        <div className="py-20 text-center text-xs font-semibold text-gray-450">
+                            No batteries found matching your search.
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                            {filteredBatteries.map(batteryId => {
+                                const driver = batteryAssignmentMap[batteryId];
+                                const tData = telemetryData[batteryId];
+                                const isAssigned = !!driver;
+                                
+                                let statusLabel = "Available";
+                                let statusColor = "bg-emerald-500/10 text-emerald-500";
+                                
+                                if (isAssigned) {
+                                    statusLabel = `In Use`;
+                                    statusColor = "bg-blue-500/10 text-blue-500";
+                                }
+                                
+                                const batterySoc = tData?.soc !== undefined ? Number(tData.soc) : null;
+                                const batteryVolt = tData?.Battery_Pack_voltage !== undefined 
+                                    ? Number(tData.Battery_Pack_voltage) 
+                                    : (tData?.battery !== undefined ? Number(tData.battery) : null);
+                                const batteryTemp = tData?.cell_temperature_01 !== undefined 
+                                    ? Number(tData.cell_temperature_01) 
+                                    : null;
+
+                                return (
+                                    <div
+                                        key={batteryId}
+                                        className="saas-card p-5 flex flex-col justify-between gap-5 relative overflow-hidden group select-none hover:shadow-lg transition-all"
+                                    >
+                                        <div className="flex items-start justify-between">
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-10 h-10 rounded-2xl bg-brand-green/10 text-brand-green flex items-center justify-center font-bold text-sm">
+                                                    🔋
+                                                </div>
+                                                <div>
+                                                    <h4 className="font-mono font-extrabold text-xs text-brand-navy dark:text-white leading-tight tracking-tight">
+                                                        {batteryId}
+                                                    </h4>
+                                                    <span className="text-[9px] text-gray-400 font-bold uppercase tracking-wider block mt-0.5">
+                                                        {PREDEFINED_BATTERIES.includes(batteryId) ? "Predefined Asset" : "Dynamic Registry"}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            
+                                            <div className="flex flex-col items-end gap-1.5 shrink-0">
+                                                <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase px-2.5 py-0.5 rounded-full ${statusColor}`}>
+                                                    <span className={`w-1.5 h-1.5 rounded-full bg-current ${!isAssigned ? "animate-pulse" : ""}`} />
+                                                    {statusLabel}
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        <div className="py-2 px-3 rounded-2xl bg-gray-50/50 dark:bg-gray-950 border border-gray-150 dark:border-gray-850 flex items-center justify-between text-[11px] font-semibold">
+                                            <div className="space-y-0.5">
+                                                <span className="text-[9px] text-gray-400 font-bold uppercase tracking-wider block">Assigned To</span>
+                                                {isAssigned ? (
+                                                    <span className="font-extrabold text-brand-navy dark:text-white">
+                                                        {driver.FirstName} {driver.LastName}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-gray-450 italic">Unassigned (Available)</span>
+                                                )}
+                                            </div>
+                                            {isAssigned && (
+                                                <span className="text-[10px] text-gray-400">
+                                                    +91 {driver.PhoneNumber}
+                                                </span>
+                                            )}
+                                        </div>
+
+                                        <div className="space-y-3 pt-1 border-t border-gray-100 dark:border-gray-800">
+                                            {batterySoc !== null ? (
+                                                <div className="space-y-2">
+                                                    <div className="flex justify-between text-xs font-bold">
+                                                        <span className="text-gray-400">Charge (SOC)</span>
+                                                        <span className={batterySoc < 20 ? "text-amber-500" : "text-brand-green"}>
+                                                            {batterySoc}%
+                                                        </span>
+                                                    </div>
+                                                    <div className="w-full bg-gray-100 dark:bg-gray-850 h-2 rounded-full overflow-hidden">
+                                                        <div 
+                                                            className={`h-full rounded-full ${batterySoc < 20 ? "bg-amber-500 animate-pulse" : "bg-brand-green"}`}
+                                                            style={{ width: `${batterySoc}%` }}
+                                                        />
+                                                    </div>
+
+                                                    <div className="grid grid-cols-2 gap-2 pt-1 text-[10px] text-gray-500 dark:text-gray-400 font-semibold">
+                                                        <div>
+                                                            <span>Voltage: </span>
+                                                            <strong className="text-brand-navy dark:text-white">
+                                                                {batteryVolt !== null ? `${batteryVolt.toFixed(1)}V` : "--"}
+                                                            </strong>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <span>Temp: </span>
+                                                            <strong className="text-brand-navy dark:text-white">
+                                                                {batteryTemp !== null ? `${Math.round(batteryTemp)}°C` : "--"}
+                                                            </strong>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className="py-4 text-center text-[11px] text-gray-400 italic bg-gray-50/20 dark:bg-gray-950/20 rounded-2xl border border-dashed border-gray-150 dark:border-gray-850">
+                                                    No live telemetry signal.
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-gray-100 dark:border-gray-800 text-[10.5px]">
+                                            {isAssigned ? (
+                                                <>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setSelectedDriverId(driver.UserId);
+                                                        }}
+                                                        className="py-2.5 text-center bg-brand-green/15 text-brand-green hover:bg-brand-green hover:text-white rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1 shadow-xs"
+                                                    >
+                                                        ⚡ Diagnostics
+                                                    </button>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleUnlinkBatteryById(batteryId, driver);
+                                                        }}
+                                                        className="py-2.5 text-center bg-red-50 hover:bg-red-100 dark:bg-red-950/20 dark:hover:bg-red-950/40 text-red-650 dark:text-red-400 rounded-xl font-bold transition-all cursor-pointer border border-red-100 dark:border-red-900/30 flex items-center justify-center gap-1 active:scale-[0.98]"
+                                                    >
+                                                        ✕ Unlink
+                                                    </button>
+                                                </>
+                                            ) : (
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setAssigningBattery(batteryId);
+                                                        setSelectedDriverForBattery(null);
+                                                    }}
+                                                    className="col-span-2 py-2.5 text-center bg-brand-green hover:bg-brand-green-hover text-white rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1 shadow-xs active:scale-[0.98]"
+                                                >
+                                                    + Assign Driver
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )
                 )}
             </div>
             </div>
@@ -1029,6 +1336,112 @@ export default function Home() {
                                 </div>
                             )}
 
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {linkDriver && (
+                <LinkBatteryModal
+                    userId={linkDriver.UserId}
+                    userName={`${linkDriver.FirstName} ${linkDriver.LastName}`}
+                    onClose={() => setLinkDriver(null)}
+                    onSuccess={() => {
+                        setToast({ message: `Linked battery successfully`, type: "success" });
+                        setSelectedDriverId(null);
+                        loadDashboardData();
+                    }}
+                />
+            )}
+
+            {/* Assign Driver Modal */}
+            {assigningBattery && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-[110] px-4 animate-fade-in text-xs font-semibold">
+                    <div className="absolute inset-0" onClick={() => setAssigningBattery(null)} />
+                    
+                    <div className="relative w-full max-w-md bg-white dark:bg-gray-900 rounded-3xl shadow-2xl p-6 border border-gray-150 dark:border-gray-800 animate-scale-in">
+                        
+                        {/* Header */}
+                        <div className="flex justify-between items-center border-b border-gray-100 dark:border-gray-800 pb-3 mb-4">
+                            <div>
+                                <span className="text-[9px] font-bold text-gray-400 uppercase tracking-widest block">Assign Battery Pack</span>
+                                <h2 className="text-base font-black text-brand-navy dark:text-white uppercase tracking-tight">
+                                    Assign {assigningBattery} to Driver
+                                </h2>
+                            </div>
+                            <button
+                                onClick={() => setAssigningBattery(null)}
+                                className="p-1 rounded bg-gray-55 dark:bg-gray-800 text-gray-400 hover:text-brand-navy dark:hover:text-white cursor-pointer"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        {/* Content */}
+                        <div className="space-y-4">
+                            <div className="space-y-2">
+                                <label className="text-[10px] font-bold uppercase text-gray-400 block pl-1">Select Driver</label>
+                                
+                                <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                                    {drivers.filter(d => !d.Devices || d.Devices.length === 0).length === 0 ? (
+                                        <p className="text-center py-6 text-gray-400 italic">
+                                            No available unassigned drivers. Onboard a driver first!
+                                        </p>
+                                    ) : (
+                                        drivers
+                                            .filter(d => !d.Devices || d.Devices.length === 0)
+                                            .map((driver) => {
+                                                const isSelected = selectedDriverForBattery === driver.UserId;
+
+                                                return (
+                                                    <div
+                                                        key={driver.UserId}
+                                                        onClick={() => setSelectedDriverForBattery(driver.UserId)}
+                                                        className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-center justify-between ${
+                                                            isSelected
+                                                                ? "border-brand-green bg-brand-green/5 text-brand-green"
+                                                                : "border-gray-200 dark:border-gray-800 bg-white hover:bg-gray-50/50 dark:bg-gray-955 dark:hover:bg-gray-850 text-brand-navy dark:text-white"
+                                                        }`}
+                                                    >
+                                                        <div className="space-y-1">
+                                                            <span className="font-black text-xs">
+                                                                {driver.FirstName} {driver.LastName}
+                                                            </span>
+                                                            <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wider font-bold text-gray-400">
+                                                                <span>Phone: +91 {driver.PhoneNumber}</span>
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="flex items-center shrink-0">
+                                                            {isSelected ? (
+                                                                <span className="text-lg">✓</span>
+                                                            ) : (
+                                                                <span className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-450 px-2 py-0.5 rounded font-black">SELECT</span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Actions */}
+                            <div className="flex justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-gray-800">
+                                <button
+                                    onClick={() => setAssigningBattery(null)}
+                                    className="px-4 py-2.5 rounded-xl font-bold text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-955 cursor-pointer"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleAssignBatteryToDriver}
+                                    disabled={!selectedDriverForBattery}
+                                    className="px-5 py-2.5 bg-brand-green hover:bg-brand-green-hover text-white font-bold rounded-xl active:scale-[0.97] transition-all cursor-pointer shadow-md shadow-brand-green/20 disabled:opacity-50"
+                                >
+                                    Assign Battery
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>

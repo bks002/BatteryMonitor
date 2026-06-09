@@ -40,6 +40,7 @@ function TrackContent() {
     const [distanceLeft, setDistanceLeft] = useState(8.6);
     const [timeLeft, setTimeLeft] = useState(18);
     const [toast, setToast] = useState<string | null>(null);
+    const [gpsData, setGpsData] = useState<any | null>(null);
 
     // Delhi/Faridabad Mock Path coordinates
     const startPoint = { x: 40, y: 220 };
@@ -50,7 +51,13 @@ function TrackContent() {
             try {
                 setLoading(true);
                 const res = await fetch("/api/bgvusers");
-                if (!res.ok) throw new Error("Failed to load driver profiles");
+                if (!res.ok) {
+                    if (res.status === 401) {
+                        router.push("/login");
+                        return;
+                    }
+                    throw new Error("Failed to load driver profiles");
+                }
                 const users: Driver[] = await res.json();
                 setDrivers(users);
 
@@ -65,6 +72,7 @@ function TrackContent() {
 
                 if (activeDev) {
                     setSelectedDevice(activeDev);
+                    
                     // Fetch device telemetry
                     const devRes = await fetch(`/api/vehicle-data?vehicle_number=${activeDev}`);
                     if (devRes.ok) {
@@ -72,6 +80,24 @@ function TrackContent() {
                         if (devData.status === "success" && devData.results && devData.results.length > 0) {
                             setTelemetry(devData.results[0]);
                         }
+                    }
+
+                    // Fetch device GPS data
+                    try {
+                        const gpsRes = await fetch(`/api/gps-data?vehicle_number=${activeDev}`);
+                        if (gpsRes.ok) {
+                            const gData = await gpsRes.json();
+                            if (gData.status === "success" && gData.results && gData.results.length > 0) {
+                                setGpsData(gData.results[0]);
+                            } else {
+                                setGpsData(null);
+                            }
+                        } else {
+                            setGpsData(null);
+                        }
+                    } catch (gpsErr) {
+                        console.error("Error fetching GPS data:", gpsErr);
+                        setGpsData(null);
                     }
                 }
             } catch (err) {
@@ -222,6 +248,13 @@ function TrackContent() {
                                         <span className="w-3 h-3 rounded bg-blue-500" />
                                         <span className="text-brand-navy dark:text-white">Active vehicle ({selectedDevice})</span>
                                     </div>
+                                    {gpsData && (
+                                        <div className="text-[9px] text-gray-500 font-mono pl-5 space-y-0.5">
+                                            <div>Lat: {gpsData.lat}</div>
+                                            <div>Lng: {gpsData.lng}</div>
+                                            <div>Speed: {gpsData.speed} km/h</div>
+                                        </div>
+                                    )}
                                     <div className="flex items-center gap-2">
                                         <span className="w-3 h-3 rounded bg-brand-green" />
                                         <span className="text-brand-navy dark:text-white">Delhi Swap station #04</span>
@@ -296,6 +329,39 @@ function TrackContent() {
                                             <span className="text-xs font-black text-brand-navy dark:text-white block mt-0.5">{telemetry?.cell_temperature_01 ? `${Math.round(telemetry.cell_temperature_01)}°C` : "32°C"}</span>
                                         </div>
                                     </div>
+                                </div>
+
+                                {/* GPS Snapshot */}
+                                <div className="space-y-3 text-xs border-t border-gray-100 dark:border-gray-800 pt-4">
+                                    <span className="text-[9px] font-black uppercase text-gray-455 tracking-wider block pl-1">Live GPS Coordinates</span>
+                                    {gpsData ? (
+                                        <div className="space-y-2.5">
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                                    <span className="text-[8px] text-gray-405 block font-bold uppercase">Latitude</span>
+                                                    <span className="text-xs font-mono font-bold text-brand-navy dark:text-white block mt-0.5">{gpsData.lat}</span>
+                                                </div>
+                                                <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                                    <span className="text-[8px] text-gray-405 block font-bold uppercase">Longitude</span>
+                                                    <span className="text-xs font-mono font-bold text-brand-navy dark:text-white block mt-0.5">{gpsData.lng}</span>
+                                                </div>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                                    <span className="text-[8px] text-gray-405 block font-bold uppercase">Speed</span>
+                                                    <span className="text-xs font-black text-brand-green block mt-0.5">{gpsData.speed} km/h</span>
+                                                </div>
+                                                <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                                    <span className="text-[8px] text-gray-405 block font-bold uppercase">Odometer</span>
+                                                    <span className="text-xs font-bold text-brand-navy dark:text-white block mt-0.5">{(gpsData.odometer / 1000).toFixed(1)} km</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="p-3 text-center text-gray-400 italic bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                            No GPS signal or unmapped.
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* Navigation trigger button */}

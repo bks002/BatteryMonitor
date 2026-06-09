@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import LinkBatteryModal from "@/app/components/LinkBatteryModal";
 
 interface Device {
     Id: number;
@@ -24,6 +25,8 @@ interface Driver {
     Aadhar: string;
     Devices: Device[];
     CreatedAt: string;
+    UserTypeId?: number;
+    UserTypeName?: string;
 }
 
 export default function DriverDetailPage() {
@@ -47,6 +50,8 @@ export default function DriverDetailPage() {
     const [upiId, setUpiId] = useState("");
     const [cardNumber, setCardNumber] = useState("");
     const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
+    const [showLinkModal, setShowLinkModal] = useState(false);
+    const [gps, setGps] = useState<any | null>(null);
 
     const loadDriverData = async () => {
         if (!driverId) return;
@@ -55,7 +60,13 @@ export default function DriverDetailPage() {
             setError(null);
             
             const res = await fetch(`/api/bgvusers/${driverId}`);
-            if (!res.ok) throw new Error("Failed to load driver profile");
+            if (!res.ok) {
+                if (res.status === 401) {
+                    router.push("/login");
+                    return;
+                }
+                throw new Error("Failed to load driver profile");
+            }
             const found: Driver = await res.json();
             
             if (!found || !found.UserId) {
@@ -75,15 +86,33 @@ export default function DriverDetailPage() {
 
             setDriver(found);
 
-            // Fetch telemetry if device is linked
+            // Fetch telemetry and GPS if device is linked
             if (found.Devices && found.Devices.length > 0) {
                 const deviceNum = found.Devices[0].DeviceId.trim();
+                
                 const devRes = await fetch(`/api/vehicle-data?vehicle_number=${deviceNum}`);
                 if (devRes.ok) {
                     const devData = await devRes.json();
                     if (devData.status === "success" && devData.results && devData.results.length > 0) {
                         setTelemetry(devData.results[0]);
                     }
+                }
+
+                try {
+                    const gpsRes = await fetch(`/api/gps-data?vehicle_number=${deviceNum}`);
+                    if (gpsRes.ok) {
+                        const gpsData = await gpsRes.json();
+                        if (gpsData.status === "success" && gpsData.results && gpsData.results.length > 0) {
+                            setGps(gpsData.results[0]);
+                        } else {
+                            setGps(null);
+                        }
+                    } else {
+                        setGps(null);
+                    }
+                } catch (gpsErr) {
+                    console.error("Error fetching GPS details:", gpsErr);
+                    setGps(null);
                 }
             }
 
@@ -137,43 +166,8 @@ export default function DriverDetailPage() {
         }, 1500);
     };
 
-    const handleLinkDevice = async () => {
-        if (!driver) return;
-        const devNum = prompt(`Link battery ID/vehicle code to ${driver.FirstName} ${driver.LastName}:`);
-        if (devNum === null) return;
-        
-        if (!devNum.trim()) {
-            setToast({ message: "Device ID cannot be empty", type: "error" });
-            return;
-        }
-
-        const cleanDev = devNum.trim().toUpperCase();
-
-        try {
-            const res = await fetch("/api/bgvusers/add-device", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    Id: 0,
-                    UserId: driver.UserId,
-                    DeviceId: cleanDev,
-                    DeviceName: cleanDev,
-                    IsActive: true,
-                    CreatedAt: new Date().toISOString()
-                })
-            });
-
-            if (!res.ok) {
-                const errData = await res.json();
-                throw new Error(errData.error || errData.message || "Failed to update device mapping");
-            }
-
-            setToast({ message: `Successfully linked device ${cleanDev}`, type: "success" });
-            loadDriverData();
-        } catch (err: any) {
-            console.error(err);
-            setToast({ message: `Link failed: ${err.message}`, type: "error" });
-        }
+    const handleLinkDevice = () => {
+        setShowLinkModal(true);
     };
 
     const handleUnlinkDevice = async () => {
@@ -303,6 +297,15 @@ export default function DriverDetailPage() {
                                     }`}>
                                         {driver.IsActive ? "Verified Partner" : "Verification Pending"}
                                     </span>
+                                    {driver.UserTypeName && (
+                                        <span className={`inline-flex items-center gap-1.5 text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                            driver.UserTypeId === 1
+                                                ? "bg-purple-500/10 text-purple-650 dark:text-purple-400"
+                                                : "bg-gray-500/10 text-gray-550 dark:text-gray-405"
+                                        }`}>
+                                            {driver.UserTypeName}
+                                        </span>
+                                    )}
                                 </div>
                             </div>
                         </div>
@@ -440,6 +443,46 @@ export default function DriverDetailPage() {
                         ) : (
                             <div className="p-8 text-center text-xs font-semibold text-gray-400">
                                 Link an active IoT device first to view telemetry diagnostics.
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Live GPS & Location Card */}
+                    <div className="saas-card p-6 space-y-6">
+                        <div className="border-b border-gray-100 dark:border-gray-800 pb-4 flex justify-between items-center">
+                            <h3 className="text-xs font-black uppercase text-gray-455 tracking-wider">Live GPS & Location</h3>
+                            <span className="flex items-center gap-1.5 font-bold text-[9px] text-gray-400">
+                                <span className={`w-2 h-2 rounded-full ${gps ? "bg-brand-green animate-ping" : "bg-red-500"}`} /> 
+                                {gps ? "GPS LOCK ESTABLISHED" : "NO GPS LOCK"}
+                            </span>
+                        </div>
+
+                        {device && gps ? (
+                            <div className="space-y-4 text-xs font-semibold">
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="p-3 bg-gray-55 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                        <span className="text-[9px] text-gray-400 block font-bold uppercase tracking-wider">Latitude</span>
+                                        <span className="text-sm font-mono font-black text-brand-navy dark:text-white mt-1 block">{gps.lat}</span>
+                                    </div>
+                                    <div className="p-3 bg-gray-55 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                        <span className="text-[9px] text-gray-400 block font-bold uppercase tracking-wider">Longitude</span>
+                                        <span className="text-sm font-mono font-black text-brand-navy dark:text-white mt-1 block">{gps.lng}</span>
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="p-3 bg-gray-55 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                        <span className="text-[9px] text-gray-400 block font-bold uppercase tracking-wider">Current Speed</span>
+                                        <span className="text-sm font-black text-brand-green mt-1 block">{gps.speed} km/h</span>
+                                    </div>
+                                    <div className="p-3 bg-gray-55 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
+                                        <span className="text-[9px] text-gray-400 block font-bold uppercase tracking-wider">Odometer</span>
+                                        <span className="text-sm font-black text-brand-navy dark:text-white mt-1 block">{(gps.odometer / 1000).toFixed(1)} km</span>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-8 text-center text-xs font-semibold text-gray-400">
+                                {device ? "No live GPS signal or coordinates unmapped." : "Link an active IoT device first to view GPS location."}
                             </div>
                         )}
                     </div>
@@ -664,6 +707,18 @@ export default function DriverDetailPage() {
 
                     </div>
                 </div>
+            )}
+
+            {showLinkModal && driver && (
+                <LinkBatteryModal
+                    userId={driver.UserId}
+                    userName={`${driver.FirstName} ${driver.LastName}`}
+                    onClose={() => setShowLinkModal(false)}
+                    onSuccess={() => {
+                        setToast({ message: "Linked battery successfully", type: "success" });
+                        loadDriverData();
+                    }}
+                />
             )}
         </>
     );
