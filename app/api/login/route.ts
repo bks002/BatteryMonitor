@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = "http://localhost:62929";
+const BACKEND_URL = "https://api.urest.in:8096";
 
 export async function POST(req: Request) {
     try {

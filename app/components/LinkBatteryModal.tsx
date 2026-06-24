@@ -9,13 +9,6 @@ type Props = {
     onSuccess: () => void;
 };
 
-const PREDEFINED_BATTERIES = [
-    "CIN25D0178",
-    "CCLN26B0126",
-    "CCLN26B0140",
-    "CCLN26B0054",
-    "CGF25F0077"
-];
 
 interface BatteryStatus {
     deviceId: string;
@@ -53,8 +46,22 @@ export default function LinkBatteryModal({ userId, userName, onClose, onSuccess 
                 }
             });
 
+            // Fetch catalog devices from database
+            let catalogBatteries: string[] = [];
+            try {
+                const devListRes = await fetch("/api/bgvusers/devices");
+                if (devListRes.ok) {
+                    const devicesData = await devListRes.json();
+                    if (Array.isArray(devicesData)) {
+                        catalogBatteries = devicesData.map((d: any) => d.DeviceCode.trim().toUpperCase());
+                    }
+                }
+            } catch (err) {
+                console.error("Error fetching catalog devices:", err);
+            }
+
             // Fetch dynamically registered batteries from Google Sheet
-            let dynamicBatteries = [...PREDEFINED_BATTERIES];
+            let dynamicBatteries = [...catalogBatteries];
             try {
                 const sheetRes = await fetch("/api/get-registered-devices");
                 if (sheetRes.ok) {

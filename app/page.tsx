@@ -29,13 +29,16 @@ interface Driver {
     UserTypeName?: string;
 }
 
-const PREDEFINED_BATTERIES = [
-    "CIN25D0178",
-    "CCLN26B0126",
-    "CCLN26B0140",
-    "CCLN26B0054",
-    "CGF25F0077"
-];
+interface CatalogDevice {
+    DeviceId: number;
+    DeviceCode: string;
+    DeviceName: string;
+    IsActive: boolean;
+    CreatedAt?: string;
+    UpdatedAt?: string;
+    CreatedBy?: number | null;
+    UpdatedBy?: number | null;
+}
 
 export default function Home() {
     const router = useRouter();
@@ -43,6 +46,18 @@ export default function Home() {
     const [telemetryData, setTelemetryData] = useState<Record<string, any>>({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [lang, setLang] = useState<"en" | "hi">("en");
+
+    useEffect(() => {
+        const handleLangUpdate = () => {
+            setLang((localStorage.getItem("bgv_lang") as "en" | "hi") || "en");
+        };
+        window.addEventListener("bgv_lang_changed", handleLangUpdate);
+        handleLangUpdate();
+        return () => window.removeEventListener("bgv_lang_changed", handleLangUpdate);
+    }, []);
+
+    const isHindi = lang === "hi";
     const [selectedDriverId, setSelectedDriverId] = useState<number | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
@@ -53,6 +68,16 @@ export default function Home() {
     const [sheetBatteries, setSheetBatteries] = useState<string[]>([]);
     const [assigningBattery, setAssigningBattery] = useState<string | null>(null);
     const [selectedDriverForBattery, setSelectedDriverForBattery] = useState<number | null>(null);
+    const [selectedModalDeviceId, setSelectedModalDeviceId] = useState<string | null>(null);
+    const [catalogDevices, setCatalogDevices] = useState<CatalogDevice[]>([]);
+    const [deviceModalOpen, setDeviceModalOpen] = useState(false);
+    const [editingDevice, setEditingDevice] = useState<CatalogDevice | null>(null);
+    const [deviceForm, setDeviceForm] = useState({ deviceCode: "", deviceName: "", isActive: true });
+
+    // Auto reset selectedModalDeviceId if selectedDriverId changes
+    useEffect(() => {
+        setSelectedModalDeviceId(null);
+    }, [selectedDriverId]);
 
     // Load initial data and poll telemetry
     const loadDashboardData = async () => {
@@ -88,13 +113,26 @@ export default function Home() {
             } catch (err) {
                 console.error("Error fetching registered devices:", err);
             }
+            // Fetch catalog devices from database
+            let dbDevices: CatalogDevice[] = [];
+            try {
+                const devListRes = await fetch("/api/bgvusers/devices");
+                if (devListRes.ok) {
+                    dbDevices = await devListRes.json();
+                    setCatalogDevices(dbDevices);
+                }
+            } catch (err) {
+                console.error("Error fetching catalog devices:", err);
+            }
+
+            const dbBatteries = dbDevices.map(d => d.DeviceCode.trim().toUpperCase());
             setSheetBatteries(sheetRegistered);
 
-            // Fetch telemetry details for all unique batteries (predefined, sheet-registered, and mapped)
+            // Fetch telemetry details for all unique batteries (db-catalog, sheet-registered, and mapped)
             const telemetryMap: Record<string, any> = {};
             const allUniqueBatteries = Array.from(
                 new Set([
-                    ...PREDEFINED_BATTERIES,
+                    ...dbBatteries,
                     ...sheetRegistered,
                     ...users
                         .map(u => u.Devices ? u.Devices.map(d => d.DeviceId.trim().toUpperCase()).filter(Boolean) : [])
@@ -180,8 +218,8 @@ export default function Home() {
     };
 
     // Handle Unlink Device
-    const handleUnlinkDevice = async (driver: Driver) => {
-        const deviceRecord = driver.Devices && driver.Devices.length > 0 ? driver.Devices[0] : null;
+    const handleUnlinkDevice = async (driver: Driver, specificDevice?: Device) => {
+        const deviceRecord = specificDevice || (driver.Devices && driver.Devices.length > 0 ? driver.Devices[0] : null);
         if (!deviceRecord) return;
         if (!confirm(`Are you sure you want to unlink the battery asset ${deviceRecord.DeviceId}?`)) return;
 
@@ -272,9 +310,118 @@ export default function Home() {
         }
     };
 
+    // Device Catalog CRUD handlers
+    const handleAddDeviceClick = () => {
+        setEditingDevice(null);
+        setDeviceForm({
+            deviceCode: "",
+            deviceName: "",
+            isActive: true
+        });
+        setDeviceModalOpen(true);
+    };
+
+    const handleEditDeviceClick = (device: CatalogDevice) => {
+        setEditingDevice(device);
+        setDeviceForm({
+            deviceCode: device.DeviceCode,
+            deviceName: device.DeviceName,
+            isActive: device.IsActive
+        });
+        setDeviceModalOpen(true);
+    };
+
+    const handleDeleteDeviceClick = async (device: CatalogDevice) => {
+        if (!confirm(`Are you sure you want to delete battery asset "${device.DeviceCode}" from the catalog?`)) {
+            return;
+        }
+
+        try {
+            const res = await fetch(`/api/bgvusers/devices/delete/${device.DeviceId}`, {
+                method: "DELETE"
+            });
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || errData.message || "Failed to delete device");
+            }
+
+            setToast({ message: `Battery asset ${device.DeviceCode} deleted successfully`, type: "info" });
+            loadDashboardData();
+        } catch (err: any) {
+            console.error(err);
+            setToast({ message: `Delete failed: ${err.message}`, type: "error" });
+        }
+    };
+
+    const handleDeviceFormSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!deviceForm.deviceCode.trim()) {
+            setToast({ message: "Device Code is required", type: "error" });
+            return;
+        }
+
+        try {
+            let res;
+            if (editingDevice) {
+                // Update device in catalog
+                res = await fetch(`/api/bgvusers/devices/update/${editingDevice.DeviceId}`, {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        DeviceId: editingDevice.DeviceId,
+                        DeviceCode: deviceForm.deviceCode.trim(),
+                        DeviceName: deviceForm.deviceName.trim() || deviceForm.deviceCode.trim(),
+                        IsActive: deviceForm.isActive,
+                        CreatedAt: editingDevice.CreatedAt,
+                        CreatedBy: editingDevice.CreatedBy,
+                        UpdatedAt: new Date().toISOString()
+                    })
+                });
+            } else {
+                // Create device in catalog
+                res = await fetch("/api/bgvusers/devices/add", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        DeviceId: 0,
+                        DeviceCode: deviceForm.deviceCode.trim(),
+                        DeviceName: deviceForm.deviceName.trim() || deviceForm.deviceCode.trim(),
+                        IsActive: deviceForm.isActive,
+                        CreatedAt: new Date().toISOString(),
+                        UpdatedAt: null,
+                        CreatedBy: null,
+                        UpdatedBy: null
+                    })
+                });
+            }
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || errData.message || "Failed to save device");
+            }
+
+            setToast({
+                message: editingDevice 
+                    ? `Device ${deviceForm.deviceCode} updated successfully` 
+                    : `Device ${deviceForm.deviceCode} added to catalog`,
+                type: "success"
+            });
+            setDeviceModalOpen(false);
+            loadDashboardData();
+        } catch (err: any) {
+            console.error(err);
+            setToast({ message: `Save failed: ${err.message}`, type: "error" });
+        }
+    };
+
     // Derived stats
     const totalDrivers = drivers.length;
-    const activeDevicesCount = drivers.filter(d => d.Devices && d.Devices.length > 0).length;
+    const activeDevicesCount = drivers.reduce((acc, d) => acc + (d.Devices ? d.Devices.length : 0), 0);
     const onlineTelemetry = Object.values(telemetryData);
     const averageSoc = onlineTelemetry.length > 0
         ? Math.round(onlineTelemetry.reduce((acc, curr) => acc + (curr.soc || 0), 0) / onlineTelemetry.length)
@@ -292,8 +439,9 @@ export default function Home() {
         );
     });
 
-    // Combine predefined and sheet-registered batteries
-    const allBatteries = Array.from(new Set([...PREDEFINED_BATTERIES, ...sheetBatteries]));
+    // Combine db-catalog and sheet-registered batteries
+    const dbBatteries = catalogDevices.map(d => d.DeviceCode.trim().toUpperCase());
+    const allBatteries = Array.from(new Set([...dbBatteries, ...sheetBatteries]));
 
     // Build mapping: batteryId -> driver who has it assigned
     const batteryAssignmentMap: Record<string, Driver> = {};
@@ -329,20 +477,38 @@ export default function Home() {
     const devicesToUse = currentDriver
         ? (selectedDriverDevices.length > 0 ? selectedDriverDevices : (currentDriver.Devices || []))
         : [];
-    const deviceId = devicesToUse.length > 0 
+    const deviceId = selectedModalDeviceId || (devicesToUse.length > 0 
         ? devicesToUse[0].DeviceId.trim() 
-        : "";
+        : "");
     const tel = deviceId ? telemetryData[deviceId] : null;
 
     // Determine driver status badge
     const getDriverStatus = (d: Driver) => {
         if (!d.Devices || d.Devices.length === 0) return { label: "No Device", color: "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400" };
-        const device = d.Devices[0].DeviceId.trim();
-        const t = telemetryData[device];
-        if (!t) return { label: "Offline", color: "bg-gray-150 dark:bg-gray-800/50 text-gray-400" };
-        if (t.Alert) return { label: "Alert", color: "bg-red-500/10 text-red-500" };
-        if (t.soc < 20) return { label: "Low SOC", color: "bg-amber-500/10 text-amber-500" };
-        return { label: "Active", color: "bg-emerald-500/10 text-emerald-500" };
+        
+        let hasOffline = false;
+        let hasActive = false;
+        let hasAlert = false;
+        let hasLowSoc = false;
+
+        d.Devices.forEach(devRecord => {
+            const dev = devRecord.DeviceId.trim();
+            const t = telemetryData[dev];
+            if (!t) {
+                hasOffline = true;
+            } else if (t.Alert) {
+                hasAlert = true;
+            } else if (t.soc < 20) {
+                hasLowSoc = true;
+            } else {
+                hasActive = true;
+            }
+        });
+
+        if (hasAlert) return { label: "Alert", color: "bg-red-500/10 text-red-500" };
+        if (hasLowSoc) return { label: "Low SOC", color: "bg-amber-500/10 text-amber-500" };
+        if (hasActive) return { label: "Active", color: "bg-emerald-500/10 text-emerald-500" };
+        return { label: "Offline", color: "bg-gray-150 dark:bg-gray-800/50 text-gray-400" };
     };
 
     // Generate cell voltages fallback
@@ -430,9 +596,13 @@ export default function Home() {
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
                 <div className="saas-card p-6 flex items-center justify-between group">
                     <div className="space-y-1">
-                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest block">Total Drivers</span>
+                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest block">
+                            {isHindi ? "कुल ड्राइवर्स" : "Total Drivers"}
+                        </span>
                         <h3 className="text-2xl font-black text-brand-navy dark:text-white leading-tight">{totalDrivers}</h3>
-                        <p className="text-[10px] text-gray-405">Registered Hero Partners</p>
+                        <p className="text-[10px] text-gray-405">
+                            {isHindi ? "पंजीकृत हीरो पार्टनर्स" : "Registered Hero Partners"}
+                        </p>
                     </div>
                     <div className="w-12 h-12 rounded-2xl bg-brand-green/10 text-brand-green flex items-center justify-center transition-transform group-hover:scale-110">
                         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -443,9 +613,13 @@ export default function Home() {
 
                 <div className="saas-card p-6 flex items-center justify-between group">
                     <div className="space-y-1">
-                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest block">Active Devices</span>
+                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest block">
+                            {isHindi ? "सक्रिय डिवाइसेस" : "Active Devices"}
+                        </span>
                         <h3 className="text-2xl font-black text-brand-navy dark:text-white leading-tight">{activeDevicesCount}</h3>
-                        <p className="text-[10px] text-gray-405">Mapped IoT Modules</p>
+                        <p className="text-[10px] text-gray-405">
+                            {isHindi ? "मैप किए गए IoT मॉड्यूल्स" : "Mapped IoT Modules"}
+                        </p>
                     </div>
                     <div className="w-12 h-12 rounded-2xl bg-blue-500/10 text-blue-500 flex items-center justify-center transition-transform group-hover:scale-110">
                         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -456,9 +630,13 @@ export default function Home() {
 
                 <div className="saas-card p-6 flex items-center justify-between group">
                     <div className="space-y-1">
-                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest block">Fleet Avg. SOC</span>
+                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest block">
+                            {isHindi ? "फ्लीट औसत SOC" : "Fleet Avg. SOC"}
+                        </span>
                         <h3 className="text-2xl font-black text-brand-navy dark:text-white leading-tight">{averageSoc}%</h3>
-                        <p className="text-[10px] text-gray-405">Mean Battery Charge</p>
+                        <p className="text-[10px] text-gray-405">
+                            {isHindi ? "औसत बैटरी चार्ज" : "Mean Battery Charge"}
+                        </p>
                     </div>
                     <div className="w-12 h-12 rounded-2xl bg-brand-gold/10 text-brand-gold flex items-center justify-center transition-transform group-hover:scale-110">
                         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -469,11 +647,17 @@ export default function Home() {
 
                 <div className="saas-card p-6 flex items-center justify-between group">
                     <div className="space-y-1">
-                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest block">Active Alerts</span>
+                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest block">
+                            {isHindi ? "सक्रिय अलर्ट" : "Active Alerts"}
+                        </span>
                         <h3 className={`text-2xl font-black leading-tight ${activeAlertsCount > 0 ? "text-red-500" : "text-emerald-500"}`}>
                             {activeAlertsCount}
                         </h3>
-                        <p className="text-[10px] text-gray-450">{activeAlertsCount > 0 ? "Requires Diagnostics" : "All Systems Healthy"}</p>
+                        <p className="text-[10px] text-gray-405">
+                            {activeAlertsCount > 0 
+                                ? (isHindi ? "निदान की आवश्यकता है" : "Requires Diagnostics") 
+                                : (isHindi ? "सभी प्रणालियाँ स्वस्थ हैं" : "All Systems Healthy")}
+                        </p>
                     </div>
                     <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-transform group-hover:scale-110 ${
                         activeAlertsCount > 0 ? "bg-red-500/10 text-red-500" : "bg-emerald-500/10 text-emerald-500"
@@ -495,9 +679,9 @@ export default function Home() {
                                 dashboardTab === "drivers"
                                     ? "border-brand-green text-brand-green"
                                     : "border-transparent text-gray-450 hover:text-brand-navy dark:hover:text-white"
-                            }`}
+                             }`}
                         >
-                            👥 Driver Fleet ({filteredDrivers.length})
+                            👥 {isHindi ? "ड्राइवर बेड़ा" : "Driver Fleet"} ({filteredDrivers.length})
                         </button>
                         <button
                             onClick={() => setDashboardTab("batteries")}
@@ -507,23 +691,37 @@ export default function Home() {
                                     : "border-transparent text-gray-450 hover:text-brand-navy dark:hover:text-white"
                             }`}
                         >
-                            🔋 Battery Inventory ({filteredBatteries.length})
+                            🔋 {isHindi ? "बैटरी इन्वेंट्री" : "Battery Inventory"} ({filteredBatteries.length})
                         </button>
                     </div>
                     
-                    <div className="relative">
-                        <span className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-gray-400">
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                            </svg>
-                        </span>
-                        <input
-                            type="text"
-                            placeholder={dashboardTab === "drivers" ? "Search drivers or devices..." : "Search batteries or assigned drivers..."}
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            className="pl-9 pr-4 py-2.5 w-full sm:w-64 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50/50 dark:bg-gray-950 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-brand-green focus:border-transparent transition-all"
-                        />
+                    <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
+                        {dashboardTab === "batteries" && (
+                            <button
+                                onClick={handleAddDeviceClick}
+                                className="px-4 py-2.5 bg-brand-green hover:bg-brand-green-hover text-white text-xs font-bold rounded-xl active:scale-[0.98] transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                            >
+                                + {isHindi ? "बैटरी जोड़ें" : "Add Battery Asset"}
+                            </button>
+                        )}
+                        <div className="relative flex-1 sm:flex-initial">
+                            <span className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-gray-400">
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                </svg>
+                            </span>
+                            <input
+                                type="text"
+                                placeholder={
+                                    dashboardTab === "drivers" 
+                                        ? (isHindi ? "ड्राइवर्स या डिवाइसेस खोजें..." : "Search drivers or devices...") 
+                                        : (isHindi ? "बैटरी या असाइन किए गए ड्राइवर्स खोजें..." : "Search batteries or assigned drivers...")
+                                }
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                className="pl-9 pr-4 py-2.5 w-full sm:w-64 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-55/50 dark:bg-gray-950 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-brand-green focus:border-transparent transition-all"
+                            />
+                        </div>
                     </div>
                 </div>
 
@@ -551,7 +749,7 @@ export default function Home() {
                                     <div
                                         key={d.UserId}
                                         onClick={() => setSelectedDriverId(d.UserId)}
-                                        className="saas-card p-5 cursor-pointer flex flex-col justify-between gap-5 relative overflow-hidden group select-none hover:shadow-lg transition-all"
+                                        className="saas-card p-5 cursor-pointer flex flex-col justify-between gap-5 relative overflow-hidden group select-none hover:shadow-lg transition-all animate-fade-in"
                                     >
                                         <div className="flex items-start justify-between">
                                             <div className="flex items-center gap-3">
@@ -583,78 +781,97 @@ export default function Home() {
                                             </div>
                                         </div>
 
-                                        <div className="space-y-3 pt-1 border-t border-gray-100 dark:border-gray-800">
-                                            <div className="flex justify-between items-center text-xs">
-                                                <span className="text-gray-400 font-bold uppercase text-[9px]">Battery ID</span>
-                                                <span className="font-mono font-bold text-gray-750 dark:text-gray-300">
-                                                    {dev || <span className="text-gray-405 italic font-normal">Unmapped</span>}
-                                                </span>
-                                            </div>
+                                        <div className="space-y-4 pt-1 border-t border-gray-100 dark:border-gray-800">
+                                            {d.Devices && d.Devices.length > 0 ? (
+                                                d.Devices.map((deviceRecord, idx) => {
+                                                    const devIdVal = deviceRecord.DeviceId.trim();
+                                                    const tDataVal = devIdVal ? telemetryData[devIdVal] : null;
 
-                                            {dev && tData ? (
-                                                <div className="space-y-2">
-                                                    <div className="flex justify-between text-xs font-bold">
-                                                        <span className="text-gray-400">Charge (SOC)</span>
-                                                        <span className={tData.soc < 20 ? "text-amber-500" : "text-brand-green"}>{tData.soc}%</span>
-                                                    </div>
-                                                    <div className="w-full bg-gray-100 dark:bg-gray-850 h-2 rounded-full overflow-hidden">
-                                                        <div 
-                                                            className={`h-full rounded-full ${tData.soc < 20 ? "bg-amber-500 animate-pulse" : "bg-brand-green"}`}
-                                                            style={{ width: `${tData.soc}%` }}
-                                                        />
-                                                    </div>
+                                                    return (
+                                                        <div key={devIdVal} className={`space-y-3 ${idx > 0 ? "pt-4 border-t border-dashed border-gray-200 dark:border-gray-800" : ""}`}>
+                                                            <div className="flex justify-between items-center text-xs">
+                                                                <span className="text-gray-400 font-bold uppercase text-[9px]">Battery ID</span>
+                                                                <span className="font-mono font-bold text-gray-750 dark:text-gray-300 flex items-center gap-1.5">
+                                                                    <span className={`w-1.5 h-1.5 rounded-full ${tDataVal ? (tDataVal.Alert ? "bg-red-500 animate-pulse" : "bg-emerald-500 animate-pulse") : "bg-gray-300"}`} />
+                                                                    {devIdVal}
+                                                                </span>
+                                                            </div>
 
-                                                    <div className="grid grid-cols-2 gap-2 pt-1 text-[10px] text-gray-500 dark:text-gray-400 font-semibold">
-                                                        <div>
-                                                            <span>Voltage: </span>
-                                                            <strong className="text-brand-navy dark:text-white">
-                                                                {tData.Battery_Pack_voltage ? `${Number(tData.Battery_Pack_voltage).toFixed(1)}V` : `${Number(tData.battery ?? 0).toFixed(1)}V`}
-                                                            </strong>
+                                                            {tDataVal ? (
+                                                                <div className="space-y-2">
+                                                                    <div className="flex justify-between text-xs font-bold">
+                                                                        <span className="text-gray-400">Charge (SOC)</span>
+                                                                        <span className={tDataVal.soc < 20 ? "text-amber-500" : "text-brand-green"}>{tDataVal.soc}%</span>
+                                                                    </div>
+                                                                    <div className="w-full bg-gray-100 dark:bg-gray-850 h-2 rounded-full overflow-hidden">
+                                                                        <div 
+                                                                            className={`h-full rounded-full ${tDataVal.soc < 20 ? "bg-amber-500 animate-pulse" : "bg-brand-green"}`}
+                                                                            style={{ width: `${tDataVal.soc}%` }}
+                                                                        />
+                                                                    </div>
+
+                                                                    <div className="grid grid-cols-2 gap-2 pt-1 text-[10px] text-gray-500 dark:text-gray-400 font-semibold">
+                                                                        <div>
+                                                                            <span>Voltage: </span>
+                                                                            <strong className="text-brand-navy dark:text-white">
+                                                                                {tDataVal.Battery_Pack_voltage ? `${Number(tDataVal.Battery_Pack_voltage).toFixed(1)}V` : `${Number(tDataVal.battery ?? 0).toFixed(1)}V`}
+                                                                            </strong>
+                                                                        </div>
+                                                                        <div className="text-right">
+                                                                            <span>Temp: </span>
+                                                                            <strong className="text-brand-navy dark:text-white">
+                                                                                {tDataVal.cell_temperature_01 ? `${Math.round(tDataVal.cell_temperature_01)}°C` : "--"}
+                                                                            </strong>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="py-2 text-center text-[11px] text-gray-400 italic bg-gray-50/20 dark:bg-gray-950/20 rounded-xl border border-dashed border-gray-150 dark:border-gray-850">
+                                                                    No live telemetry signal.
+                                                                </div>
+                                                            )}
+
+                                                            <div className="grid grid-cols-2 gap-2 pt-1 text-[10.5px]">
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setSelectedDriverId(d.UserId);
+                                                                        setSelectedModalDeviceId(devIdVal);
+                                                                    }}
+                                                                    className="py-2 text-center bg-brand-green/15 text-brand-green hover:bg-brand-green hover:text-white rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1 shadow-xs"
+                                                                >
+                                                                    ⚡ Diagnostics
+                                                                </button>
+                                                                <Link
+                                                                    href={`/track?vehicle_number=${devIdVal}`}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    className="py-2 text-center bg-gray-50 hover:bg-gray-105 dark:bg-gray-800 dark:hover:bg-gray-750 text-brand-navy dark:text-white rounded-xl font-bold transition-all border border-gray-200 dark:border-transparent flex items-center justify-center gap-1"
+                                                                >
+                                                                    🗺️ Track GPS
+                                                                </Link>
+                                                            </div>
                                                         </div>
-                                                        <div className="text-right">
-                                                            <span>Temp: </span>
-                                                            <strong className="text-brand-navy dark:text-white">
-                                                                {tData.cell_temperature_01 ? `${Math.round(tData.cell_temperature_01)}°C` : "--"}
-                                                            </strong>
-                                                        </div>
+                                                    );
+                                                })
+                                            ) : (
+                                                <div className="space-y-3">
+                                                    <div className="flex justify-between items-center text-xs">
+                                                        <span className="text-gray-400 font-bold uppercase text-[9px]">Battery ID</span>
+                                                        <span className="text-gray-405 italic font-normal">Unmapped</span>
                                                     </div>
+                                                    <div className="py-4 text-center text-[11px] text-gray-400 italic bg-gray-50/20 dark:bg-gray-950/20 rounded-xl border border-dashed border-gray-150 dark:border-gray-850">
+                                                        No battery asset mapped.
+                                                    </div>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleLinkDevice(d);
+                                                        }}
+                                                        className="w-full py-2.5 text-center bg-gray-50 hover:bg-gray-105 dark:bg-gray-800 dark:hover:bg-gray-750 text-brand-navy dark:text-white rounded-xl font-bold transition-all border border-gray-200 dark:border-transparent cursor-pointer flex items-center justify-center gap-1"
+                                                    >
+                                                        + Link Battery
+                                                    </button>
                                                 </div>
-                                            ) : (
-                                                <div className="py-4 text-center text-[11px] text-gray-400 italic">
-                                                    No live telemetry signal.
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-gray-100 dark:border-gray-800 text-[10.5px]">
-                                            <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    setSelectedDriverId(d.UserId);
-                                                }}
-                                                className="py-2.5 text-center bg-brand-green/15 text-brand-green hover:bg-brand-green hover:text-white rounded-xl font-bold transition-all cursor-pointer flex items-center justify-center gap-1 shadow-xs"
-                                            >
-                                                ⚡ Diagnostics
-                                            </button>
-                                            
-                                            {dev ? (
-                                                <Link
-                                                    href={`/track?vehicle_number=${dev}`}
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    className="py-2.5 text-center bg-gray-50 hover:bg-gray-105 dark:bg-gray-800 dark:hover:bg-gray-750 text-brand-navy dark:text-white rounded-xl font-bold transition-all border border-gray-200 dark:border-transparent flex items-center justify-center gap-1"
-                                                >
-                                                    🗺️ Track GPS
-                                                </Link>
-                                            ) : (
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        handleLinkDevice(d);
-                                                    }}
-                                                    className="py-2.5 text-center bg-gray-50 hover:bg-gray-105 dark:bg-gray-800 dark:hover:bg-gray-750 text-brand-navy dark:text-white rounded-xl font-bold transition-all border border-gray-200 dark:border-transparent cursor-pointer flex items-center justify-center gap-1"
-                                                >
-                                                    + Link Battery
-                                                </button>
                                             )}
                                         </div>
                                     </div>
@@ -705,8 +922,39 @@ export default function Home() {
                                                         {batteryId}
                                                     </h4>
                                                     <span className="text-[9px] text-gray-400 font-bold uppercase tracking-wider block mt-0.5">
-                                                        {PREDEFINED_BATTERIES.includes(batteryId) ? "Predefined Asset" : "Dynamic Registry"}
+                                                        {catalogDevices.some(d => d.DeviceCode.trim().toUpperCase() === batteryId.toUpperCase()) ? "Catalog Asset" : "Dynamic Registry"}
                                                     </span>
+                                                    {(() => {
+                                                        const dbDevice = catalogDevices.find(d => d.DeviceCode.trim().toUpperCase() === batteryId.toUpperCase());
+                                                        if (dbDevice) {
+                                                            return (
+                                                                <div className="flex items-center gap-2 mt-1">
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            handleEditDeviceClick(dbDevice);
+                                                                        }}
+                                                                        className="text-[10px] text-blue-500 hover:text-blue-700 font-bold cursor-pointer transition-colors"
+                                                                        title="Edit Asset Details"
+                                                                    >
+                                                                        ✏️ Edit
+                                                                    </button>
+                                                                    <span className="text-gray-300 dark:text-gray-800 text-[10px]">•</span>
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            handleDeleteDeviceClick(dbDevice);
+                                                                        }}
+                                                                        className="text-[10px] text-red-500 hover:text-red-700 font-bold cursor-pointer transition-colors"
+                                                                        title="Delete Asset"
+                                                                    >
+                                                                        🗑️ Delete
+                                                                    </button>
+                                                                </div>
+                                                            );
+                                                        }
+                                                        return null;
+                                                    })()}
                                                 </div>
                                             </div>
                                             
@@ -853,6 +1101,30 @@ export default function Home() {
                                     </p>
                                 </div>
                             </div>
+
+                            {/* Multiple Devices Selector */}
+                            {devicesToUse.length > 1 && (
+                                <div className="flex flex-wrap items-center gap-2 mt-4 bg-black/10 p-1.5 rounded-2xl border border-white/5 animate-fade-in">
+                                    <span className="text-[9px] font-bold uppercase tracking-wider text-white/60 pl-2">Select Active Device:</span>
+                                    {devicesToUse.map(devRecord => {
+                                        const devId = devRecord.DeviceId.trim();
+                                        const isActive = devId.toUpperCase() === deviceId.toUpperCase();
+                                        return (
+                                            <button
+                                                key={devId}
+                                                onClick={() => setSelectedModalDeviceId(devId)}
+                                                className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all cursor-pointer ${
+                                                    isActive 
+                                                        ? "bg-white text-brand-green shadow-xs" 
+                                                        : "text-white/80 hover:bg-white/10 hover:text-white"
+                                                }`}
+                                            >
+                                                🔋 {devId}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
 
                             {/* Tab Selectors inside Header */}
                             <div className="flex gap-2.5 mt-6 border-t border-white/10 pt-4 text-[11px] font-bold">
@@ -1298,7 +1570,10 @@ export default function Home() {
                                             <div className="flex gap-2">
                                                 {deviceId ? (
                                                     <button
-                                                        onClick={() => handleUnlinkDevice(currentDriver)}
+                                                        onClick={() => {
+                                                            const activeDeviceRecord = devicesToUse.find(dev => dev.DeviceId.trim().toUpperCase() === deviceId.toUpperCase());
+                                                            handleUnlinkDevice(currentDriver, activeDeviceRecord);
+                                                        }}
                                                         className="px-4 py-2 bg-red-50 hover:bg-red-100 text-red-650 dark:bg-red-950/20 dark:hover:bg-red-950/40 dark:text-red-400 rounded-xl font-bold transition-all text-xs border border-red-100 dark:border-red-900/30 cursor-pointer"
                                                     >
                                                         Unlink Battery
@@ -1444,6 +1719,91 @@ export default function Home() {
                             </div>
                         </div>
                     </div>
+                </div>
+            )}
+            {/* Catalog Device Add/Edit Modal */}
+            {deviceModalOpen && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-[110] px-4 animate-fade-in text-xs font-semibold">
+                    <div className="absolute inset-0" onClick={() => setDeviceModalOpen(false)} />
+                    
+                    <form 
+                        onSubmit={handleDeviceFormSubmit}
+                        className="relative w-full max-w-md bg-white dark:bg-gray-900 rounded-3xl shadow-2xl p-6 border border-gray-150 dark:border-gray-800 animate-scale-in space-y-4 text-brand-navy dark:text-white"
+                    >
+                        {/* Header */}
+                        <div className="flex justify-between items-center border-b border-gray-100 dark:border-gray-800 pb-3">
+                            <div>
+                                <span className="text-[9px] font-bold text-gray-400 uppercase tracking-widest block">Catalog Asset Manager</span>
+                                <h2 className="text-base font-black uppercase tracking-tight">
+                                    {editingDevice ? `Edit Battery ${editingDevice.DeviceCode}` : "Add New Battery Asset"}
+                                </h2>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setDeviceModalOpen(false)}
+                                className="p-1 rounded bg-gray-55 dark:bg-gray-800 text-gray-400 hover:text-brand-navy dark:hover:text-white cursor-pointer"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        {/* Form Body */}
+                        <div className="space-y-4">
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-bold uppercase text-gray-400 block pl-1">Device / Battery Code</label>
+                                <input
+                                    type="text"
+                                    required
+                                    disabled={!!editingDevice}
+                                    value={deviceForm.deviceCode}
+                                    onChange={(e) => setDeviceForm({ ...deviceForm, deviceCode: e.target.value })}
+                                    placeholder="e.g. CGF25F0077"
+                                    className="w-full px-4 py-2.5 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50/50 dark:bg-gray-950 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-brand-green focus:border-transparent transition-all disabled:opacity-50 text-brand-navy dark:text-white"
+                                />
+                            </div>
+
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-bold uppercase text-gray-400 block pl-1">Device Name</label>
+                                <input
+                                    type="text"
+                                    value={deviceForm.deviceName}
+                                    onChange={(e) => setDeviceForm({ ...deviceForm, deviceName: e.target.value })}
+                                    placeholder="e.g. Battery CGF25F0077"
+                                    className="w-full px-4 py-2.5 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50/50 dark:bg-gray-955 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-brand-green focus:border-transparent transition-all text-brand-navy dark:text-white"
+                                />
+                            </div>
+
+                            <div className="flex items-center gap-2 pl-1 pt-1">
+                                <input
+                                    type="checkbox"
+                                    id="device-active-checkbox"
+                                    checked={deviceForm.isActive}
+                                    onChange={(e) => setDeviceForm({ ...deviceForm, isActive: e.target.checked })}
+                                    className="w-4 h-4 text-brand-green border-gray-200 dark:border-gray-800 rounded focus:ring-brand-green focus:outline-none"
+                                />
+                                <label htmlFor="device-active-checkbox" className="text-xs font-bold text-gray-600 dark:text-gray-300 cursor-pointer select-none">
+                                    Is Active Asset
+                                </label>
+                            </div>
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-gray-800">
+                            <button
+                                type="button"
+                                onClick={() => setDeviceModalOpen(false)}
+                                className="px-4 py-2.5 rounded-xl font-bold text-gray-500 hover:bg-gray-55 dark:hover:bg-gray-955 cursor-pointer"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="submit"
+                                className="px-5 py-2.5 bg-brand-green hover:bg-brand-green-hover text-white font-bold rounded-xl active:scale-[0.97] transition-all cursor-pointer shadow-md shadow-brand-green/20"
+                            >
+                                {editingDevice ? "Save Changes" : "Register Asset"}
+                            </button>
+                        </div>
+                    </form>
                 </div>
             )}
         </>

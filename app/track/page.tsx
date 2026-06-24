@@ -3,6 +3,23 @@
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import dynamic from "next/dynamic";
+
+const LeafletMap = dynamic(
+    () => import("../components/LeafletMap"),
+    {
+        ssr: false,
+        loading: () => (
+            <div className="w-full h-full bg-slate-100 dark:bg-slate-950 flex flex-col items-center justify-center space-y-3">
+                <div className="relative w-8 h-8">
+                    <div className="absolute inset-0 rounded-full border-4 border-brand-green/10" />
+                    <div className="absolute inset-0 rounded-full border-4 border-t-brand-green animate-spin" />
+                </div>
+                <p className="text-[11px] font-bold text-gray-400">Loading interactive satellite map...</p>
+            </div>
+        )
+    }
+);
 
 interface Device {
     Id: number;
@@ -34,20 +51,20 @@ function TrackContent() {
     const [loading, setLoading] = useState(true);
     const [selectedDevice, setSelectedDevice] = useState<string>("");
 
+    // Simulation coordinates
+    const startGPS = { lat: 28.4550, lng: 77.3100 }; // Sector 37 Faridabad
+    const endGPS = { lat: 28.3889, lng: 77.3150 };   // Sector 12 Faridabad Swap Station
+
     // Simulation states
     const [isNavigating, setIsNavigating] = useState(false);
-    const [carOffset, setCarOffset] = useState({ x: 40, y: 220 });
+    const [currentCoord, setCurrentCoord] = useState<{ lat: number; lng: number }>(startGPS);
     const [distanceLeft, setDistanceLeft] = useState(8.6);
     const [timeLeft, setTimeLeft] = useState(18);
     const [toast, setToast] = useState<string | null>(null);
     const [gpsData, setGpsData] = useState<any | null>(null);
 
-    // Delhi/Faridabad Mock Path coordinates
-    const startPoint = { x: 40, y: 220 };
-    const endPoint = { x: 260, y: 60 };
-
     useEffect(() => {
-        const fetchDriversAndTelemetry = async () => {
+        const fetchDriversAndSetupActive = async () => {
             try {
                 setLoading(true);
                 const res = await fetch("/api/bgvusers");
@@ -72,33 +89,6 @@ function TrackContent() {
 
                 if (activeDev) {
                     setSelectedDevice(activeDev);
-                    
-                    // Fetch device telemetry
-                    const devRes = await fetch(`/api/vehicle-data?vehicle_number=${activeDev}`);
-                    if (devRes.ok) {
-                        const devData = await devRes.json();
-                        if (devData.status === "success" && devData.results && devData.results.length > 0) {
-                            setTelemetry(devData.results[0]);
-                        }
-                    }
-
-                    // Fetch device GPS data
-                    try {
-                        const gpsRes = await fetch(`/api/gps-data?vehicle_number=${activeDev}`);
-                        if (gpsRes.ok) {
-                            const gData = await gpsRes.json();
-                            if (gData.status === "success" && gData.results && gData.results.length > 0) {
-                                setGpsData(gData.results[0]);
-                            } else {
-                                setGpsData(null);
-                            }
-                        } else {
-                            setGpsData(null);
-                        }
-                    } catch (gpsErr) {
-                        console.error("Error fetching GPS data:", gpsErr);
-                        setGpsData(null);
-                    }
                 }
             } catch (err) {
                 console.error("Tracking load error:", err);
@@ -107,8 +97,56 @@ function TrackContent() {
             }
         };
 
-        fetchDriversAndTelemetry();
+        fetchDriversAndSetupActive();
     }, [targetVehicle]);
+
+    // Live GPS and Telemetry Sync Interval
+    useEffect(() => {
+        if (!selectedDevice || isNavigating) return;
+
+        const syncTelemetryAndGps = async () => {
+            try {
+                // Fetch device telemetry
+                const devRes = await fetch(`/api/vehicle-data?vehicle_number=${selectedDevice}`);
+                if (devRes.ok) {
+                    const devData = await devRes.json();
+                    if (devData.status === "success" && devData.results && devData.results.length > 0) {
+                        setTelemetry(devData.results[0]);
+                    }
+                }
+
+                // Fetch device GPS data
+                const gpsRes = await fetch(`/api/gps-data?vehicle_number=${selectedDevice}`);
+                if (gpsRes.ok) {
+                    const gData = await gpsRes.json();
+                    if (gData.status === "success" && gData.results && gData.results.length > 0) {
+                        const firstGps = gData.results[0];
+                        setGpsData(firstGps);
+                        
+                        // Parse coordinates if they exist
+                        const latVal = Number(firstGps.lat);
+                        const lngVal = Number(firstGps.lng);
+                        if (!isNaN(latVal) && !isNaN(lngVal) && latVal !== 0 && lngVal !== 0) {
+                            setCurrentCoord({ lat: latVal, lng: lngVal });
+                        }
+                    } else {
+                        setGpsData(null);
+                    }
+                } else {
+                    setGpsData(null);
+                }
+            } catch (gpsErr) {
+                console.error("Error fetching telemetry & GPS:", gpsErr);
+                setGpsData(null);
+            }
+        };
+
+        // Perform initial fetch
+        syncTelemetryAndGps();
+
+        const timer = setInterval(syncTelemetryAndGps, 5000);
+        return () => clearInterval(timer);
+    }, [selectedDevice, isNavigating]);
 
     // Handle simulation movement
     useEffect(() => {
@@ -118,17 +156,15 @@ function TrackContent() {
             const animate = () => {
                 progress += 0.003;
                 if (progress >= 1) {
-                    setCarOffset(endPoint);
+                    setCurrentCoord(endGPS);
                     setDistanceLeft(0);
                     setTimeLeft(0);
                     setIsNavigating(false);
                     setToast("Vehicle has arrived at Faridabad Swap Hub!");
                 } else {
-                    const cx = 150;
-                    const cy = 200;
-                    const x = (1 - progress) * (1 - progress) * startPoint.x + 2 * (1 - progress) * progress * cx + progress * progress * endPoint.x;
-                    const y = (1 - progress) * (1 - progress) * startPoint.y + 2 * (1 - progress) * progress * cy + progress * progress * endPoint.y;
-                    setCarOffset({ x, y });
+                    const lat = startGPS.lat + (endGPS.lat - startGPS.lat) * progress;
+                    const lng = startGPS.lng + (endGPS.lng - startGPS.lng) * progress;
+                    setCurrentCoord({ lat, lng });
 
                     const dist = 8.6 * (1 - progress);
                     setDistanceLeft(Number(dist.toFixed(1)));
@@ -150,9 +186,10 @@ function TrackContent() {
 
     const handleSelectDevice = (dev: string) => {
         setIsNavigating(false);
-        setCarOffset(startPoint);
+        setCurrentCoord(startGPS);
         setDistanceLeft(8.6);
         setTimeLeft(18);
+        setSelectedDevice(dev);
         router.push(`/track?vehicle_number=${dev}`);
     };
 
@@ -208,56 +245,29 @@ function TrackContent() {
 
                             {/* Map Area */}
                             <div className="relative w-full h-[450px] bg-slate-100 dark:bg-slate-950 overflow-hidden">
-                                {/* SVG Grid & Roads Map */}
-                                <svg className="absolute inset-0 w-full h-full text-slate-200 dark:text-slate-900" viewBox="0 0 320 280" fill="none">
-                                    {/* Major Grid Roads */}
-                                    <path d="M0 60 L320 60 M0 130 L320 130 M0 210 L320 210 M80 0 L80 280 M180 0 L180 280 M270 0 L270 280" stroke="currentColor" strokeWidth="2.5" />
-                                    {/* Minor highways */}
-                                    <path d="M40 0 C 100 80, 120 180, 40 280" stroke="currentColor" strokeWidth="1" strokeDasharray="3 3" />
-                                    <path d="M0 240 C 120 210, 200 240, 320 180" stroke="currentColor" strokeWidth="1" strokeDasharray="3 3" />
-
-                                    {/* Delhi/Faridabad Border boundary */}
-                                    <path d="M0 10 L320 10" stroke="#ef4444" strokeWidth="1" strokeDasharray="4 4" opacity="0.3" />
-                                    <text x="10" y="24" className="fill-red-500/50 text-[8px] font-mono" fontStyle="italic">DELHI / NCR SECTOR LINE</text>
-
-                                    {/* Station Target Pin */}
-                                    <circle cx={endPoint.x} cy={endPoint.y} r="16" className="fill-brand-green/20" />
-                                    <circle cx={endPoint.x} cy={endPoint.y} r="6" className="fill-brand-green" />
-
-                                    {/* Path Line */}
-                                    <path 
-                                        d={`M ${startPoint.x} ${startPoint.y} Q 150 200, ${endPoint.x} ${endPoint.y}`} 
-                                        stroke="#10b981" 
-                                        strokeWidth="4" 
-                                        strokeLinecap="round" 
-                                        strokeLinejoin="round" 
-                                        opacity="0.4"
-                                    />
-
-                                    {/* Animated Vehicle Node */}
-                                    <circle cx={carOffset.x} cy={carOffset.y} r="14" className="fill-blue-500 shadow-md" />
-                                    <circle cx={carOffset.x} cy={carOffset.y} r="5" className="fill-white" />
-                                </svg>
-
-                                {/* Live Pulsing marker overlay on target */}
-                                <div className="absolute top-[52px] left-[252px] w-4 h-4 map-pulse" />
+                                <LeafletMap 
+                                    vehicleLat={currentCoord.lat}
+                                    vehicleLng={currentCoord.lng}
+                                    vehicleName={selectedDevice}
+                                    isSimulating={isNavigating}
+                                />
 
                                 {/* Map Legend floating overlay */}
-                                <div className="absolute bottom-4 left-4 bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm border border-gray-200 dark:border-gray-800 p-3 rounded-xl space-y-2 text-[10px] font-bold">
+                                <div className="absolute bottom-4 left-4 bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm border border-gray-200 dark:border-gray-800 p-3 rounded-xl space-y-2 text-[10px] font-bold z-[1000]">
                                     <div className="flex items-center gap-2">
                                         <span className="w-3 h-3 rounded bg-blue-500" />
                                         <span className="text-brand-navy dark:text-white">Active vehicle ({selectedDevice})</span>
                                     </div>
                                     {gpsData && (
                                         <div className="text-[9px] text-gray-500 font-mono pl-5 space-y-0.5">
-                                            <div>Lat: {gpsData.lat}</div>
-                                            <div>Lng: {gpsData.lng}</div>
+                                            <div>Lat: {currentCoord.lat.toFixed(5)}</div>
+                                            <div>Lng: {currentCoord.lng.toFixed(5)}</div>
                                             <div>Speed: {gpsData.speed} km/h</div>
                                         </div>
                                     )}
-                                    <div className="flex items-center gap-2">
-                                        <span className="w-3 h-3 rounded bg-brand-green" />
-                                        <span className="text-brand-navy dark:text-white">Delhi Swap station #04</span>
+                                    <div className="border-t border-gray-150 dark:border-gray-800 pt-2 text-[9px] text-gray-400 flex flex-col gap-0.5">
+                                        <span className="uppercase font-extrabold tracking-wider text-[8px]">Target Swap Destination:</span>
+                                        <span className="text-brand-navy dark:text-white font-bold text-[9.5px]">Faridabad Swap Hub (Sector 12)</span>
                                     </div>
                                 </div>
                             </div>
@@ -276,14 +286,16 @@ function TrackContent() {
                                     className="flex-1 px-3 py-2 border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50 dark:bg-gray-950 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-brand-green cursor-pointer"
                                 >
                                     <option value="" disabled>Select vehicle...</option>
-                                    {drivers.filter(d => d.Devices && d.Devices.length > 0).map(d => {
-                                        const dev = d.Devices[0].DeviceId.trim();
-                                        return (
-                                            <option key={d.UserId} value={dev}>
-                                                {dev} - {d.FirstName} {d.LastName}
-                                            </option>
-                                        );
-                                    })}
+                                    {drivers.filter(d => d.Devices && d.Devices.length > 0).flatMap(d => 
+                                        d.Devices.map(devRecord => {
+                                            const dev = devRecord.DeviceId.trim();
+                                            return (
+                                                <option key={`${d.UserId}-${dev}`} value={dev}>
+                                                    {dev} - {d.FirstName} {d.LastName}
+                                                </option>
+                                            );
+                                        })
+                                    )}
                                 </select>
                             </div>
                         </div>
@@ -330,30 +342,31 @@ function TrackContent() {
                                         </div>
                                     </div>
                                 </div>
-
                                 {/* GPS Snapshot */}
                                 <div className="space-y-3 text-xs border-t border-gray-100 dark:border-gray-800 pt-4">
                                     <span className="text-[9px] font-black uppercase text-gray-455 tracking-wider block pl-1">Live GPS Coordinates</span>
-                                    {gpsData ? (
+                                    {selectedDevice ? (
                                         <div className="space-y-2.5">
                                             <div className="grid grid-cols-2 gap-3">
                                                 <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
                                                     <span className="text-[8px] text-gray-405 block font-bold uppercase">Latitude</span>
-                                                    <span className="text-xs font-mono font-bold text-brand-navy dark:text-white block mt-0.5">{gpsData.lat}</span>
+                                                    <span className="text-xs font-mono font-bold text-brand-navy dark:text-white block mt-0.5">{currentCoord.lat.toFixed(6)}</span>
                                                 </div>
                                                 <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
                                                     <span className="text-[8px] text-gray-405 block font-bold uppercase">Longitude</span>
-                                                    <span className="text-xs font-mono font-bold text-brand-navy dark:text-white block mt-0.5">{gpsData.lng}</span>
+                                                    <span className="text-xs font-mono font-bold text-brand-navy dark:text-white block mt-0.5">{currentCoord.lng.toFixed(6)}</span>
                                                 </div>
                                             </div>
                                             <div className="grid grid-cols-2 gap-3">
                                                 <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
                                                     <span className="text-[8px] text-gray-405 block font-bold uppercase">Speed</span>
-                                                    <span className="text-xs font-black text-brand-green block mt-0.5">{gpsData.speed} km/h</span>
+                                                    <span className="text-xs font-black text-brand-green block mt-0.5">{gpsData?.speed ?? (isNavigating ? 28 : 0)} km/h</span>
                                                 </div>
                                                 <div className="p-2.5 bg-gray-50 dark:bg-gray-955 border border-gray-200 dark:border-gray-800 rounded-xl">
                                                     <span className="text-[8px] text-gray-405 block font-bold uppercase">Odometer</span>
-                                                    <span className="text-xs font-bold text-brand-navy dark:text-white block mt-0.5">{(gpsData.odometer / 1000).toFixed(1)} km</span>
+                                                    <span className="text-xs font-bold text-brand-navy dark:text-white block mt-0.5">
+                                                        {gpsData ? (gpsData.odometer / 1000).toFixed(1) : "12.4"} km
+                                                    </span>
                                                 </div>
                                             </div>
                                         </div>
@@ -376,7 +389,7 @@ function TrackContent() {
                                 ) : (
                                     <button
                                         onClick={() => {
-                                            setCarOffset(startPoint);
+                                            setCurrentCoord(startGPS);
                                             setDistanceLeft(8.6);
                                             setTimeLeft(18);
                                             setIsNavigating(false);

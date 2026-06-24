@@ -39,6 +39,7 @@ export default function DriverDetailPage() {
     const [telemetry, setTelemetry] = useState<any | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
 
     // EMI and Razorpay payment states
     const [paidMonths, setPaidMonths] = useState(4); // default mock
@@ -86,36 +87,6 @@ export default function DriverDetailPage() {
 
             setDriver(found);
 
-            // Fetch telemetry and GPS if device is linked
-            if (found.Devices && found.Devices.length > 0) {
-                const deviceNum = found.Devices[0].DeviceId.trim();
-                
-                const devRes = await fetch(`/api/vehicle-data?vehicle_number=${deviceNum}`);
-                if (devRes.ok) {
-                    const devData = await devRes.json();
-                    if (devData.status === "success" && devData.results && devData.results.length > 0) {
-                        setTelemetry(devData.results[0]);
-                    }
-                }
-
-                try {
-                    const gpsRes = await fetch(`/api/gps-data?vehicle_number=${deviceNum}`);
-                    if (gpsRes.ok) {
-                        const gpsData = await gpsRes.json();
-                        if (gpsData.status === "success" && gpsData.results && gpsData.results.length > 0) {
-                            setGps(gpsData.results[0]);
-                        } else {
-                            setGps(null);
-                        }
-                    } else {
-                        setGps(null);
-                    }
-                } catch (gpsErr) {
-                    console.error("Error fetching GPS details:", gpsErr);
-                    setGps(null);
-                }
-            }
-
             // Sync dynamic mock EMI state based on User ID
             const storedPaid = localStorage.getItem(`bgv_emi_paid_${found.UserId}`);
             if (storedPaid) {
@@ -136,7 +107,49 @@ export default function DriverDetailPage() {
         }
     };
 
+    const device = activeDeviceId || (driver?.Devices && driver.Devices.length > 0 ? driver.Devices[0].DeviceId.trim() : "");
+
+    // Fetch telemetry and GPS when active device changes
     useEffect(() => {
+        if (!device) {
+            setTelemetry(null);
+            setGps(null);
+            return;
+        }
+
+        const fetchDeviceData = async () => {
+            try {
+                const devRes = await fetch(`/api/vehicle-data?vehicle_number=${device}`);
+                if (devRes.ok) {
+                    const devData = await devRes.json();
+                    if (devData.status === "success" && devData.results && devData.results.length > 0) {
+                        setTelemetry(devData.results[0]);
+                    } else {
+                        setTelemetry(null);
+                    }
+                }
+
+                const gpsRes = await fetch(`/api/gps-data?vehicle_number=${device}`);
+                if (gpsRes.ok) {
+                    const gpsData = await gpsRes.json();
+                    if (gpsData.status === "success" && gpsData.results && gpsData.results.length > 0) {
+                        setGps(gpsData.results[0]);
+                    } else {
+                        setGps(null);
+                    }
+                }
+            } catch (err) {
+                console.error("Error fetching device data:", err);
+            }
+        };
+
+        fetchDeviceData();
+        const interval = setInterval(fetchDeviceData, 30000);
+        return () => clearInterval(interval);
+    }, [device]);
+
+    useEffect(() => {
+        setActiveDeviceId(null);
         loadDriverData();
     }, [driverId]);
 
@@ -172,7 +185,9 @@ export default function DriverDetailPage() {
 
     const handleUnlinkDevice = async () => {
         if (!driver) return;
-        const deviceRecord = driver.Devices && driver.Devices.length > 0 ? driver.Devices[0] : null;
+        const deviceRecord = driver.Devices && driver.Devices.length > 0 
+            ? driver.Devices.find(d => d.DeviceId.trim().toUpperCase() === device.toUpperCase())
+            : null;
         if (!deviceRecord) return;
         if (!confirm(`Are you sure you want to unlink the battery asset ${deviceRecord.DeviceId}?`)) return;
 
@@ -187,7 +202,7 @@ export default function DriverDetailPage() {
             }
 
             setToast({ message: "Device unlinked successfully", type: "info" });
-            setTelemetry(null);
+            setActiveDeviceId(null);
             loadDriverData();
         } catch (err: any) {
             console.error(err);
@@ -220,7 +235,7 @@ export default function DriverDetailPage() {
         );
     }
 
-    const device = driver.Devices && driver.Devices.length > 0 ? driver.Devices[0].DeviceId.trim() : "";
+    // Active device is calculated above
 
     return (
         <>
@@ -350,6 +365,29 @@ export default function DriverDetailPage() {
                                 </button>
                             )}
                         </div>
+
+                        {driver.Devices && driver.Devices.length > 1 && (
+                            <div className="flex flex-wrap items-center gap-2 p-1.5 bg-gray-50/50 dark:bg-slate-950 rounded-2xl border border-gray-150 dark:border-gray-850 animate-fade-in">
+                                <span className="text-[9px] font-bold uppercase tracking-wider text-gray-400 pl-2">Select Active Device:</span>
+                                {driver.Devices.map(devRecord => {
+                                    const devId = devRecord.DeviceId.trim();
+                                    const isActive = devId.toUpperCase() === device.toUpperCase();
+                                    return (
+                                        <button
+                                            key={devId}
+                                            onClick={() => setActiveDeviceId(devId)}
+                                            className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all cursor-pointer ${
+                                                isActive 
+                                                    ? "bg-white text-brand-green shadow-xs border border-gray-200 dark:border-transparent dark:bg-gray-800 dark:text-white" 
+                                                    : "text-gray-550 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-900"
+                                            }`}
+                                        >
+                                            🔋 {devId}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )}
 
                         {device ? (
                             <div className="space-y-4">
@@ -487,227 +525,46 @@ export default function DriverDetailPage() {
                         )}
                     </div>
 
-                    {/* EMI Schedule Card */}
-                    <div className="saas-card p-6 space-y-6">
-                        <div className="border-b border-gray-100 dark:border-gray-800 pb-4">
-                            <h3 className="text-xs font-black uppercase text-gray-455 tracking-wider">EMI Loan Ledger</h3>
+                    {/* EMI Schedule Card (Simplified) */}
+                    <div className="saas-card p-6 space-y-4">
+                        <div className="border-b border-gray-100 dark:border-gray-800 pb-3 flex justify-between items-center">
+                            <h3 className="text-xs font-black uppercase text-gray-455 tracking-wider">EMI Loan Summary</h3>
+                            <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase ${
+                                pendingBalance <= 0 
+                                    ? "bg-emerald-500/10 text-brand-green" 
+                                    : "bg-amber-500/10 text-amber-500"
+                            }`}>
+                                {pendingBalance <= 0 ? "Fully Paid" : "Active Loan"}
+                            </span>
                         </div>
 
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 text-xs">
-                            <div className="space-y-3.5 flex-1">
-                                <div>
-                                    <span className="text-[9px] text-gray-400 block font-bold uppercase tracking-wider">Monthly Installment</span>
-                                    <span className="text-lg font-black text-brand-navy dark:text-white block mt-0.5">₹ 5,500</span>
-                                </div>
-                                <div className="flex justify-between items-center text-[11px] font-bold">
-                                    <span className="text-gray-400">Due Schedule:</span>
-                                    <span className="text-brand-navy dark:text-white">25th of Current Month</span>
-                                </div>
-                                <div className="flex justify-between items-center text-[11px] font-bold">
-                                    <span className="text-gray-400">Paid Installments:</span>
-                                    <span className="text-brand-green">{paidMonths} / 12 Months</span>
-                                </div>
+                        <div className="grid grid-cols-2 gap-4 text-xs font-semibold">
+                            <div className="p-3 bg-gray-55 dark:bg-gray-955 border border-gray-150 dark:border-gray-800 rounded-xl">
+                                <span className="text-[9px] text-gray-400 block font-bold uppercase tracking-wider">Monthly Installment</span>
+                                <span className="text-base font-black text-brand-navy dark:text-white mt-1 block">₹ 5,500</span>
                             </div>
-
-                            {/* Circular gauge */}
-                            <div className="w-24 h-24 flex items-center justify-center relative select-none mx-auto sm:mx-0">
-                                <svg viewBox="0 0 36 36" className="circular-chart w-full h-full">
-                                    <path className="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                                    <path 
-                                        className="circle stroke-brand-green" 
-                                        strokeDasharray={`${Math.round((paidMonths / 12) * 100)}, 100`}
-                                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" 
-                                    />
-                                </svg>
-                                <div className="absolute text-center">
-                                    <span className="text-[8px] text-gray-400 font-bold block uppercase">Pending</span>
-                                    <span className="text-[10px] font-black text-brand-navy dark:text-white leading-tight">₹{pendingBalance.toLocaleString()}</span>
-                                    <span className="text-[7.5px] text-gray-400 font-bold block">{12 - paidMonths} Months</span>
-                                </div>
+                            <div className="p-3 bg-gray-55 dark:bg-gray-955 border border-gray-150 dark:border-gray-800 rounded-xl">
+                                <span className="text-[9px] text-gray-400 block font-bold uppercase tracking-wider">Paid Installments</span>
+                                <span className="text-base font-black text-brand-green mt-1 block">{paidMonths} / 12 Months</span>
+                            </div>
+                            <div className="p-3 bg-gray-55 dark:bg-gray-955 border border-gray-150 dark:border-gray-800 rounded-xl col-span-2">
+                                <span className="text-[9px] text-gray-400 block font-bold uppercase tracking-wider">Remaining Balance</span>
+                                <span className="text-base font-black text-brand-navy dark:text-white mt-1 block">₹ {pendingBalance.toLocaleString()}</span>
                             </div>
                         </div>
 
-                        {/* Paid dots schedule */}
-                        <div className="space-y-2">
-                            <span className="text-[9px] font-bold text-gray-400 uppercase tracking-widest block pl-1">Payment Timeline</span>
-                            <div className="flex items-center gap-2 p-3 bg-gray-50 dark:bg-gray-955 rounded-xl border border-gray-150 dark:border-gray-800">
-                                {Array.from({ length: 12 }, (_, i) => (
-                                    <span 
-                                        key={i} 
-                                        title={`Month ${i+1}: ${i < paidMonths ? "Paid" : "Pending"}`}
-                                        className={`w-3.5 h-3.5 rounded-full flex-1 transition-all ${
-                                            i < paidMonths 
-                                                ? "bg-brand-green shadow-sm shadow-brand-green/20" 
-                                                : "bg-gray-200 dark:bg-gray-800"
-                                        }`}
-                                    />
-                                ))}
-                            </div>
-                        </div>
-
-                        <button
-                            onClick={() => {
-                                setUpiId(`${driver.FirstName.toLowerCase()}@upi`);
-                                setCardNumber("4312 9980 1455 5337");
-                                setPaymentSuccess(false);
-                                setPaymentLoading(false);
-                                setShowPaymentGate(true);
-                            }}
-                            disabled={pendingBalance <= 0}
-                            className="w-full bg-brand-green hover:bg-brand-green-hover text-white py-3 rounded-2xl font-bold transition-all active:scale-[0.98] cursor-pointer text-center disabled:opacity-50"
-                        >
-                            {pendingBalance <= 0 ? "Ledger Fully Paid" : "Collect EMI Payment"}
-                        </button>
-                    </div>
-
-                </div>
-
-            </div>
-            </div>
-
-            {/* Payment Gateway Modal (Razorpay Mockup) */}
-            {showPaymentGate && (
-                <div className="fixed inset-0 bg-black/75 backdrop-blur-xs z-[100] flex items-center justify-center p-4 transition-opacity animate-fade-in">
-                    
-                    {/* Simulator Card Box */}
-                    <div className="w-full max-w-sm bg-white dark:bg-gray-900 rounded-3xl shadow-2xl overflow-hidden border border-gray-200 dark:border-gray-800 text-xs font-semibold animate-scale-in z-50">
-                        
-                        {/* Razorpay Brand Header */}
-                        <div className="bg-blue-600 text-white p-5 flex justify-between items-center">
-                            <div className="space-y-0.5">
-                                <span className="text-[9px] font-bold uppercase tracking-widest opacity-80">Razorpay Checkout</span>
-                                <h3 className="text-sm font-black">BharatGreenVolt Solutions</h3>
-                            </div>
-                            <button 
-                                onClick={() => setShowPaymentGate(false)}
-                                className="text-white hover:opacity-85 text-sm"
+                        <div className="pt-2">
+                            <Link
+                                href="/loans"
+                                className="w-full inline-block text-center bg-brand-green hover:bg-brand-green-hover text-white py-2.5 rounded-xl font-bold transition-all active:scale-[0.98] cursor-pointer text-xs"
                             >
-                                ✕
-                            </button>
+                                Manage in Loans Ledger →
+                            </Link>
                         </div>
-
-                        {/* Payment Details Container */}
-                        <div className="p-5 space-y-5">
-                            
-                            {/* Amount Summary */}
-                            <div className="flex justify-between items-center bg-slate-50 dark:bg-slate-950 p-4 rounded-2xl border border-gray-100 dark:border-gray-855">
-                                <div>
-                                    <span className="text-[9px] text-gray-400 block font-bold uppercase">Installment EMI</span>
-                                    <span className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 block">{driver.FirstName} {driver.LastName} (FB{driver.UserId})</span>
-                                </div>
-                                <span className="text-lg font-black text-blue-650 dark:text-blue-400">₹5,500</span>
-                            </div>
-
-                            {paymentLoading ? (
-                                <div className="py-8 flex flex-col items-center justify-center space-y-4">
-                                    <div className="relative w-10 h-10">
-                                        <div className="absolute inset-0 rounded-full border-4 border-blue-100 dark:border-blue-955/40" />
-                                        <div className="absolute inset-0 rounded-full border-4 border-t-blue-600 animate-spin" />
-                                    </div>
-                                    <p className="text-xs text-gray-400 font-bold">Securing transaction through Razorpay network...</p>
-                                </div>
-                            ) : paymentSuccess ? (
-                                <div className="py-8 flex flex-col items-center justify-center space-y-3 animate-scale-in">
-                                    <div className="w-10 h-10 rounded-full bg-green-500 text-white flex items-center justify-center shadow-lg">
-                                        ✓
-                                    </div>
-                                    <h4 className="text-xs font-black text-green-600 block mt-2 text-center">Payment Authorized!</h4>
-                                    <p className="text-[9px] text-gray-400 font-bold text-center">Reference: TXN-{Date.now().toString().slice(-8)}</p>
-                                </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    {/* Tabs */}
-                                    <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 dark:bg-slate-955 rounded-xl border border-gray-150 dark:border-gray-850">
-                                        <button
-                                            type="button"
-                                            onClick={() => setPaymentMethod("upi")}
-                                            className={`py-2 rounded-lg font-bold text-center cursor-pointer transition-all ${
-                                                paymentMethod === "upi"
-                                                    ? "bg-white dark:bg-gray-800 shadow-sm text-blue-600"
-                                                    : "text-gray-400 hover:text-gray-600"
-                                            }`}
-                                        >
-                                            UPI / PayTM
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => setPaymentMethod("card")}
-                                            className={`py-2 rounded-lg font-bold text-center cursor-pointer transition-all ${
-                                                paymentMethod === "card"
-                                                    ? "bg-white dark:bg-gray-800 shadow-sm text-blue-600"
-                                                    : "text-gray-400 hover:text-gray-600"
-                                            }`}
-                                        >
-                                            Card Details
-                                        </button>
-                                    </div>
-
-                                    {/* Tab: UPI */}
-                                    {paymentMethod === "upi" && (
-                                        <div className="space-y-2 text-xs">
-                                            <label className="text-[9px] font-bold uppercase text-gray-405 block pl-1">VPA Handler Address</label>
-                                            <input
-                                                type="text"
-                                                placeholder="e.g. driver@upi"
-                                                value={upiId}
-                                                onChange={(e) => setUpiId(e.target.value)}
-                                                className="w-full px-3 py-2.5 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-950 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                            />
-                                        </div>
-                                    )}
-
-                                    {/* Tab: Card */}
-                                    {paymentMethod === "card" && (
-                                        <div className="space-y-3 text-xs">
-                                            <div className="space-y-1.5">
-                                                <label className="text-[9px] font-bold uppercase text-gray-405 block pl-1">Card Number</label>
-                                                <input
-                                                    type="text"
-                                                    placeholder="XXXX XXXX XXXX XXXX"
-                                                    value={cardNumber}
-                                                    onChange={(e) => setCardNumber(e.target.value)}
-                                                    className="w-full px-3 py-2.5 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-955 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                />
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-3">
-                                                <div className="space-y-1.5">
-                                                    <label className="text-[9px] font-bold uppercase text-gray-450 block pl-1">Expiry</label>
-                                                    <input
-                                                        type="text"
-                                                        placeholder="MM/YY"
-                                                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-955 text-center focus:outline-none"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1.5">
-                                                    <label className="text-[9px] font-bold uppercase text-gray-450 block pl-1">CVV</label>
-                                                    <input
-                                                        type="password"
-                                                        placeholder="•••"
-                                                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-955 text-center focus:outline-none"
-                                                    />
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    <button
-                                        onClick={handleExecutePayment}
-                                        className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-bold transition-all active:scale-[0.98] cursor-pointer text-center text-xs"
-                                    >
-                                        Authorize Payment ₹5,500
-                                    </button>
-                                </div>
-                            )}
-
-                        </div>
-
-                        <div className="p-3 bg-slate-50 dark:bg-slate-955 border-t border-gray-100 dark:border-gray-855 text-center text-[9px] text-gray-400 block font-bold uppercase tracking-wider">
-                            🛡️ PCI-DSS SECURED GATEWAY
-                        </div>
-
                     </div>
                 </div>
-            )}
+            </div>
+        </div>
 
             {showLinkModal && driver && (
                 <LinkBatteryModal
